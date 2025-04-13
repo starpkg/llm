@@ -4,6 +4,7 @@ package llm
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image/png"
@@ -16,47 +17,62 @@ import (
 	"github.com/1set/starlet"
 	"github.com/1set/starlet/dataconv"
 	"github.com/1set/starlet/dataconv/types"
-	"github.com/PureMature/starport/base"
 	oai "github.com/sashabaranov/go-openai"
+	"github.com/starpkg/base"
 	"go.starlark.net/starlark"
 )
 
 // ModuleName defines the expected name for this module when used in Starlark's load() function, e.g., load('llm', 'chat')
 const ModuleName = "llm"
 
+// Configuration key constants
+const (
+	configKeyProvider    = "openai_provider"
+	configKeyEndpointURL = "openai_endpoint_url"
+	configKeyAPIKey      = "openai_api_key"
+	configKeyGPTModel    = "openai_gpt_model"
+	configKeyDALLEModel  = "openai_dalle_model"
+)
+
 // Module wraps the ConfigurableModule with specific functionality for calling OpenAI models.
 type Module struct {
-	cfgMod *base.ConfigurableModule[string]
+	cfgMod *base.ConfigurableModule
 	cli    *oai.Client
 }
 
-// NewModule creates a new instance of Module.
+// NewModule creates a new instance of Module with default empty configurations.
 func NewModule() *Module {
-	cm := base.NewConfigurableModule[string]()
+	cm, _ := base.NewConfigurableModuleWithOptions(
+		base.WithConfigDefault(configKeyProvider, "openai"),
+		base.WithConfigDefault(configKeyEndpointURL, ""),
+		base.WithConfigDefault(configKeyAPIKey, ""),
+		base.WithConfigDefault(configKeyGPTModel, ""),
+		base.WithConfigDefault(configKeyDALLEModel, ""),
+	)
 	return &Module{cfgMod: cm}
 }
 
 // NewModuleWithConfig creates a new instance of Module with the given configuration values.
 func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleModel string) *Module {
-	cm := base.NewConfigurableModule[string]()
-	prefix := "openai_"
-	cm.SetConfigValue(prefix+"provider", serviceProvider)
-	cm.SetConfigValue(prefix+"endpoint_url", endpointURL)
-	cm.SetConfigValue(prefix+"api_key", apiKey)
-	cm.SetConfigValue(prefix+"gpt_model", gptModel)
-	cm.SetConfigValue(prefix+"dalle_model", dalleModel)
+	cm, _ := base.NewConfigurableModuleWithOptions(
+		base.WithConfigValue(configKeyProvider, serviceProvider),
+		base.WithConfigValue(configKeyEndpointURL, endpointURL),
+		base.WithConfigValue(configKeyAPIKey, apiKey),
+		base.WithConfigValue(configKeyGPTModel, gptModel),
+		base.WithConfigValue(configKeyDALLEModel, dalleModel),
+	)
 	return &Module{cfgMod: cm}
 }
 
 // NewModuleWithGetter creates a new instance of Module with the given configuration getters.
-func NewModuleWithGetter(serviceProvider, endpointURL, apiKey, gptModel, dalleModel base.ConfigGetter[string]) *Module {
-	cm := base.NewConfigurableModule[string]()
-	prefix := "openai_"
-	cm.SetConfig(prefix+"provider", serviceProvider)
-	cm.SetConfig(prefix+"endpoint_url", endpointURL)
-	cm.SetConfig(prefix+"api_key", apiKey)
-	cm.SetConfig(prefix+"gpt_model", gptModel)
-	cm.SetConfig(prefix+"dalle_model", dalleModel)
+func NewModuleWithGetter(serviceProvider, endpointURL, apiKey, gptModel, dalleModel func() string) *Module {
+	cm, _ := base.NewConfigurableModuleWithOptions(
+		base.WithConfigGetter(configKeyProvider, serviceProvider),
+		base.WithConfigGetter(configKeyEndpointURL, endpointURL),
+		base.WithConfigGetter(configKeyAPIKey, apiKey),
+		base.WithConfigGetter(configKeyGPTModel, gptModel),
+		base.WithConfigGetter(configKeyDALLEModel, dalleModel),
+	)
 	return &Module{cfgMod: cm}
 }
 
@@ -139,7 +155,7 @@ func (m *Module) genDrawFunc() starlark.Callable {
 		}
 
 		// get model
-		model := m.getModel("openai_dalle_model", userModel.GoString())
+		model := m.getModel(configKeyDALLEModel, userModel.GoString())
 		if model == "" {
 			return none, errors.New("dalle model is not set")
 		}
@@ -189,7 +205,7 @@ func (m *Module) genDrawFunc() starlark.Callable {
 
 		// return the response: if fullResponse is set, return the full response, otherwise return the content
 		if fullResponse {
-			return dataconv.GoToStarlarkViaJSON(&resp)
+			return convertGoToStarlark(resp)
 		}
 
 		// if numOfChoices is 1, return the content string, otherwise return a list of contents
@@ -261,7 +277,7 @@ func (m *Module) genChatFunc() starlark.Callable {
 		}
 
 		// get model
-		model := m.getModel("openai_gpt_model", userModel.GoString())
+		model := m.getModel(configKeyGPTModel, userModel.GoString())
 		if model == "" {
 			return none, errors.New("gpt model is not set")
 		}
@@ -351,7 +367,7 @@ func (m *Module) genChatFunc() starlark.Callable {
 
 		// return the response: if fullResponse is set, return the full response, otherwise return the content
 		if fullResponse {
-			return dataconv.GoToStarlarkViaJSON(&resp)
+			return convertGoToStarlark(resp)
 		}
 		if len(resp.Choices) == 0 {
 			return none, nil
@@ -380,22 +396,27 @@ func (m *Module) getClient(model string) (*oai.Client, error) {
 		return m.cli, nil
 	}
 
-	provider, err := m.cfgMod.GetConfig("openai_provider")
+	provider, err := base.GetConfigValue[string](m.cfgMod, configKeyProvider)
 	if err != nil {
 		provider = "openai"
 	}
-	apiKey, err := m.cfgMod.GetConfig("openai_api_key")
+
+	apiKey, err := base.GetConfigValue[string](m.cfgMod, configKeyAPIKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s is not set", configKeyAPIKey)
 	}
-	endpointURL, err := m.cfgMod.GetConfig("openai_endpoint_url")
+
+	endpointURL, err := base.GetConfigValue[string](m.cfgMod, configKeyEndpointURL)
+	if err != nil {
+		endpointURL = ""
+	}
 
 	// create client configuration
 	var cfg oai.ClientConfig
 	switch strings.ToLower(provider) {
 	case "azure": // Azure OpenAI services
-		if err != nil {
-			return nil, err // endpointURL is required for Azure
+		if endpointURL == "" {
+			return nil, fmt.Errorf("%s is required for Azure provider", configKeyEndpointURL) // endpointURL is required for Azure
 		}
 		cfg = oai.DefaultAzureConfig(apiKey, endpointURL)
 		cfg.APIVersion = `2024-02-01`
@@ -423,7 +444,7 @@ func (m *Module) getModel(key, val string) string {
 		return val
 	}
 	// or retrieve the model value from the configuration
-	model, err := m.cfgMod.GetConfig(key)
+	model, err := base.GetConfigValue[string](m.cfgMod, key)
 	if err == nil {
 		return model
 	}
@@ -561,4 +582,57 @@ func messagesToChatMessages(msgs []*starlark.Dict) ([]oai.ChatCompletionMessage,
 		res = append(res, msg)
 	}
 	return res, nil
+}
+
+// convertGoToStarlark converts a Go struct to a Starlark value using JSON marshaling.
+func convertGoToStarlark(v interface{}) (starlark.Value, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return none, err
+	}
+
+	var jsonValue interface{}
+	if err := json.Unmarshal(data, &jsonValue); err != nil {
+		return none, err
+	}
+
+	return convertJSONValueToStarlark(jsonValue)
+}
+
+// convertJSONValueToStarlark converts a JSON value to a Starlark value.
+func convertJSONValueToStarlark(v interface{}) (starlark.Value, error) {
+	switch x := v.(type) {
+	case nil:
+		return none, nil
+	case bool:
+		return starlark.Bool(x), nil
+	case float64:
+		return starlark.Float(x), nil
+	case string:
+		return starlark.String(x), nil
+	case []interface{}:
+		elems := make([]starlark.Value, len(x))
+		for i, elem := range x {
+			var err error
+			elems[i], err = convertJSONValueToStarlark(elem)
+			if err != nil {
+				return none, err
+			}
+		}
+		return starlark.NewList(elems), nil
+	case map[string]interface{}:
+		dict := starlark.NewDict(len(x))
+		for k, v := range x {
+			val, err := convertJSONValueToStarlark(v)
+			if err != nil {
+				return none, err
+			}
+			if err := dict.SetKey(starlark.String(k), val); err != nil {
+				return none, err
+			}
+		}
+		return dict, nil
+	default:
+		return none, fmt.Errorf("unsupported JSON value type: %T", v)
+	}
 }
