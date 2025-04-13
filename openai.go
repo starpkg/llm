@@ -59,57 +59,51 @@ type Module struct {
 
 // NewModule creates a new instance of Module with default empty configurations.
 func NewModule() *Module {
-	cm, _ := base.NewConfigurableModuleWithOptions(
-		base.WithConfigDefault(configKeyProvider, ProviderOpenAI),
-		base.WithConfigDefault(configKeyEndpointURL, ""),
-		base.WithConfigDefault(configKeyAPIKey, ""),
-		base.WithConfigDefault(configKeyGPTModel, ""),
-		base.WithConfigDefault(configKeyDALLEModel, ""),
-		base.WithConfigDefault(configKeyAPIVersion, defaultAPIVersion),
+	return newModuleWithOptions(
+		genConfigOption(configKeyProvider, "OpenAI provider type", ProviderOpenAI),
+		genConfigOption(configKeyEndpointURL, "OpenAI API endpoint URL", empty),
+		genConfigOption(configKeyAPIKey, "OpenAI API key", empty).SetSecret(true),
+		genConfigOption(configKeyGPTModel, "GPT model name", empty),
+		genConfigOption(configKeyDALLEModel, "DALL-E model name", empty),
+		genConfigOption(configKeyAPIVersion, "API version", defaultAPIVersion),
 	)
-	return &Module{
-		cfgMod: cm,
-		ext:    cm.Extend(),
-	}
 }
 
 // NewModuleWithConfig creates a new instance of Module with the given configuration values.
 func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleModel, apiVersion string) *Module {
-	// Create API version option with default value
-	apiVerOpt := base.NewConfigOption(defaultAPIVersion)
-	if apiVersion != "" {
-		apiVerOpt = apiVerOpt.WithValue(apiVersion)
+	// If apiVersion is empty, use the default
+	if apiVersion == "" {
+		apiVersion = defaultAPIVersion
 	}
 
-	cm, _ := base.NewConfigurableModuleWithOptions(
-		base.WithConfigValue(configKeyProvider, serviceProvider),
-		base.WithConfigValue(configKeyEndpointURL, endpointURL),
-		base.WithConfigValue(configKeyAPIKey, apiKey),
-		base.WithConfigValue(configKeyGPTModel, gptModel),
-		base.WithConfigValue(configKeyDALLEModel, dalleModel),
-		base.WithTypedConfigOption(configKeyAPIVersion, apiVerOpt),
+	return newModuleWithOptions(
+		genConfigOption(configKeyProvider, "OpenAI provider with preset value", serviceProvider),
+		genConfigOption(configKeyEndpointURL, "OpenAI API endpoint URL with preset value", endpointURL),
+		genConfigOption(configKeyAPIKey, "OpenAI API key with preset value", apiKey).SetSecret(true),
+		genConfigOption(configKeyGPTModel, "GPT model name with preset value", gptModel),
+		genConfigOption(configKeyDALLEModel, "DALL-E model name with preset value", dalleModel),
+		genConfigOption(configKeyAPIVersion, "API version with preset value", apiVersion),
 	)
-	return &Module{
-		cfgMod: cm,
-		ext:    cm.Extend(),
-	}
 }
 
-// NewModuleWithGetter creates a new instance of Module with the given configuration getters.
-func NewModuleWithGetter(serviceProvider, endpointURL, apiKey, gptModel, dalleModel, apiVersion func() string) *Module {
-	// Create API version option with default value
-	apiVerOpt := base.NewConfigOption(defaultAPIVersion)
-	if apiVersion != nil {
-		apiVerOpt = apiVerOpt.WithGetter(apiVersion)
-	}
+// genConfigOption creates a configuration option with common settings.
+// It sets up the name, description, default value, and environment variable.
+func genConfigOption(name, description, defaultValue string) *base.ConfigOption[string] {
+	return base.NewConfigOption(defaultValue).
+		WithName(name).
+		WithDescription(description).
+		WithEnvVar(strings.ToUpper(ModuleName + "_" + name))
+}
 
-	cm, _ := base.NewConfigurableModuleWithOptions(
-		base.WithConfigGetter(configKeyProvider, serviceProvider),
-		base.WithConfigGetter(configKeyEndpointURL, endpointURL),
-		base.WithConfigGetter(configKeyAPIKey, apiKey),
-		base.WithConfigGetter(configKeyGPTModel, gptModel),
-		base.WithConfigGetter(configKeyDALLEModel, dalleModel),
-		base.WithTypedConfigOption(configKeyAPIVersion, apiVerOpt),
+// newModuleWithOptions creates a Module with the given configuration options.
+func newModuleWithOptions(providerOpt, endpointOpt, apiKeyOpt, gptModelOpt, dalleModelOpt, apiVersionOpt *base.ConfigOption[string]) *Module {
+	cm, _ := base.NewConfigurableModuleWithConfigOptions(
+		providerOpt,
+		endpointOpt,
+		apiKeyOpt,
+		gptModelOpt,
+		dalleModelOpt,
+		apiVersionOpt,
 	)
 	return &Module{
 		cfgMod: cm,
@@ -128,8 +122,8 @@ func (m *Module) LoadModule() starlet.ModuleLoader {
 }
 
 var (
-	none     = starlark.None
-	emptyStr string
+	none  = starlark.None // none is a convenience variable for starlark.None
+	empty string          // empty is a convenience variable for an empty string
 )
 
 func newMessageStruct(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -495,7 +489,7 @@ func getStringFromDict(d *starlark.Dict, key string) (string, bool) {
 	v, ok, err := d.Get(starlark.String(key))
 	// if the key is not found, or the value is nil, or there is an error, return an empty string
 	if err != nil || !ok || v == nil {
-		return emptyStr, false
+		return empty, false
 	}
 	// if the value is a string, return the string
 	if s, ok := v.(starlark.String); ok {
@@ -504,7 +498,7 @@ func getStringFromDict(d *starlark.Dict, key string) (string, bool) {
 		return string(b), true
 	}
 	// otherwise, return an empty string
-	return emptyStr, false
+	return empty, false
 }
 
 // imageFileToBase64 reads file and convert it to base64 data.
