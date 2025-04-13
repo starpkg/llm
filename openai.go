@@ -389,6 +389,15 @@ func (m *Module) SetClient(cli *oai.Client) {
 	m.cli = cli
 }
 
+// getStringConfig retrieves a string configuration value with an optional default value.
+func (m *Module) getStringConfig(key string, defaultVal ...string) string {
+	val, err := base.GetConfigValue[string](m.cfgMod, key)
+	if err != nil && len(defaultVal) > 0 {
+		return defaultVal[0]
+	}
+	return val
+}
+
 // getClient retrieves the OpenAI client for this module.
 func (m *Module) getClient(model string) (*oai.Client, error) {
 	if m.cli != nil {
@@ -396,20 +405,13 @@ func (m *Module) getClient(model string) (*oai.Client, error) {
 		return m.cli, nil
 	}
 
-	provider, err := base.GetConfigValue[string](m.cfgMod, configKeyProvider)
-	if err != nil {
-		provider = "openai"
-	}
-
-	apiKey, err := base.GetConfigValue[string](m.cfgMod, configKeyAPIKey)
-	if err != nil {
+	provider := m.getStringConfig(configKeyProvider, "openai")
+	apiKey := m.getStringConfig(configKeyAPIKey)
+	if apiKey == "" {
 		return nil, fmt.Errorf("%s is not set", configKeyAPIKey)
 	}
 
-	endpointURL, err := base.GetConfigValue[string](m.cfgMod, configKeyEndpointURL)
-	if err != nil {
-		endpointURL = ""
-	}
+	endpointURL := m.getStringConfig(configKeyEndpointURL, "")
 
 	// create client configuration
 	var cfg oai.ClientConfig
@@ -444,12 +446,7 @@ func (m *Module) getModel(key, val string) string {
 		return val
 	}
 	// or retrieve the model value from the configuration
-	model, err := base.GetConfigValue[string](m.cfgMod, key)
-	if err == nil {
-		return model
-	}
-	// return an empty string if the model is not found
-	return ""
+	return m.getStringConfig(key, "")
 }
 
 // getStringFromDict retrieves a string value from a dictionary and whether the key exists
