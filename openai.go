@@ -32,6 +32,22 @@ const (
 	configKeyAPIKey      = "openai_api_key"
 	configKeyGPTModel    = "openai_gpt_model"
 	configKeyDALLEModel  = "openai_dalle_model"
+	configKeyAPIVersion  = "api_version"
+)
+
+// Provider type constants
+const (
+	// ProviderOpenAI represents the default OpenAI API provider
+	ProviderOpenAI = "openai"
+	// ProviderAzure represents the Azure OpenAI Service provider
+	ProviderAzure = "azure"
+	// ProviderAnthropic represents the Anthropic Claude API provider
+	ProviderAnthropic = "anthropic"
+)
+
+// Default values for API versions
+const (
+	defaultAPIVersion = "2024-02-01" // Azure's default API version
 )
 
 // Module wraps the ConfigurableModule with specific functionality for calling OpenAI models.
@@ -44,11 +60,12 @@ type Module struct {
 // NewModule creates a new instance of Module with default empty configurations.
 func NewModule() *Module {
 	cm, _ := base.NewConfigurableModuleWithOptions(
-		base.WithConfigDefault(configKeyProvider, "openai"),
+		base.WithConfigDefault(configKeyProvider, ProviderOpenAI),
 		base.WithConfigDefault(configKeyEndpointURL, ""),
 		base.WithConfigDefault(configKeyAPIKey, ""),
 		base.WithConfigDefault(configKeyGPTModel, ""),
 		base.WithConfigDefault(configKeyDALLEModel, ""),
+		base.WithConfigDefault(configKeyAPIVersion, defaultAPIVersion),
 	)
 	return &Module{
 		cfgMod: cm,
@@ -57,13 +74,20 @@ func NewModule() *Module {
 }
 
 // NewModuleWithConfig creates a new instance of Module with the given configuration values.
-func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleModel string) *Module {
+func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleModel, apiVersion string) *Module {
+	// Create API version option with default value
+	apiVerOpt := base.NewConfigOption(defaultAPIVersion)
+	if apiVersion != "" {
+		apiVerOpt = apiVerOpt.WithValue(apiVersion)
+	}
+
 	cm, _ := base.NewConfigurableModuleWithOptions(
 		base.WithConfigValue(configKeyProvider, serviceProvider),
 		base.WithConfigValue(configKeyEndpointURL, endpointURL),
 		base.WithConfigValue(configKeyAPIKey, apiKey),
 		base.WithConfigValue(configKeyGPTModel, gptModel),
 		base.WithConfigValue(configKeyDALLEModel, dalleModel),
+		base.WithTypedConfigOption(configKeyAPIVersion, apiVerOpt),
 	)
 	return &Module{
 		cfgMod: cm,
@@ -72,13 +96,20 @@ func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleMo
 }
 
 // NewModuleWithGetter creates a new instance of Module with the given configuration getters.
-func NewModuleWithGetter(serviceProvider, endpointURL, apiKey, gptModel, dalleModel func() string) *Module {
+func NewModuleWithGetter(serviceProvider, endpointURL, apiKey, gptModel, dalleModel, apiVersion func() string) *Module {
+	// Create API version option with default value
+	apiVerOpt := base.NewConfigOption(defaultAPIVersion)
+	if apiVersion != nil {
+		apiVerOpt = apiVerOpt.WithGetter(apiVersion)
+	}
+
 	cm, _ := base.NewConfigurableModuleWithOptions(
 		base.WithConfigGetter(configKeyProvider, serviceProvider),
 		base.WithConfigGetter(configKeyEndpointURL, endpointURL),
 		base.WithConfigGetter(configKeyAPIKey, apiKey),
 		base.WithConfigGetter(configKeyGPTModel, gptModel),
 		base.WithConfigGetter(configKeyDALLEModel, dalleModel),
+		base.WithTypedConfigOption(configKeyAPIVersion, apiVerOpt),
 	)
 	return &Module{
 		cfgMod: cm,
@@ -406,27 +437,36 @@ func (m *Module) getClient(model string) (*oai.Client, error) {
 		return m.cli, nil
 	}
 
-	provider := m.ext.GetString(configKeyProvider, "openai")
+	provider := m.ext.GetString(configKeyProvider, ProviderOpenAI)
 	apiKey := m.ext.GetString(configKeyAPIKey)
 	if apiKey == "" {
 		return nil, fmt.Errorf("%s is not set", configKeyAPIKey)
 	}
 
 	endpointURL := m.ext.GetString(configKeyEndpointURL, "")
+	apiVersion := m.ext.GetString(configKeyAPIVersion, defaultAPIVersion)
 
 	// create client configuration
 	var cfg oai.ClientConfig
 	switch strings.ToLower(provider) {
-	case "azure": // Azure OpenAI services
+	case ProviderAzure: // Azure OpenAI services
 		if endpointURL == "" {
 			return nil, fmt.Errorf("%s is required for Azure provider", configKeyEndpointURL) // endpointURL is required for Azure
 		}
 		cfg = oai.DefaultAzureConfig(apiKey, endpointURL)
-		cfg.APIVersion = `2024-02-01`
+		cfg.APIVersion = apiVersion
 		cfg.AzureModelMapperFunc = func(_ string) string {
 			return model
 		}
-	case "openai": // Vanilla OpenAI services
+	case ProviderAnthropic: // Anthropic Claude API
+		cfg = oai.DefaultConfig(apiKey)
+		cfg.APIVersion = apiVersion
+		if endpointURL != "" {
+			cfg.BaseURL = endpointURL
+		} else {
+			cfg.BaseURL = "https://api.anthropic.com"
+		}
+	case ProviderOpenAI: // Vanilla OpenAI services
 		cfg = oai.DefaultConfig(apiKey)
 		if endpointURL != "" {
 			cfg.BaseURL = endpointURL
