@@ -1,6 +1,6 @@
-# LLM Package for Starlark
+# 🤖 `llm` - Starlark Module for AI and LLM Services
 
-The `llm` package provides a Starlark module for interacting with OpenAI and OpenAI-compatible APIs. It allows you to easily generate text using chat completions and create images with DALL-E from Starlark scripts.
+A powerful Starlark module for interacting with OpenAI and OpenAI-compatible API services. Easily generate text using chat completions and create images with DALL-E from your Starlark scripts.
 
 ## Features
 
