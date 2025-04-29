@@ -1,10 +1,21 @@
 // Package llm provides a Starlark module that calls OpenAI models.
+//
+// Configuration options:
+//   - openai_provider: Provider type (openai, azure, anthropic)
+//   - openai_endpoint_url: API endpoint URL
+//   - openai_api_key: API key for authentication
+//   - openai_gpt_model: Default GPT model name
+//   - openai_dalle_model: Default DALL-E model name
+//   - api_version: API version (for Azure)
+//   - legacy_mode: Use legacy mode for data conversion (default: true)
+//
+// When legacy_mode is true (default), response objects are converted using direct struct
+// access (ConvertJSONStruct). When false, JSON conversion is used (GoToStarlarkViaJSON).
 package llm
 
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image/png"
@@ -33,6 +44,7 @@ const (
 	configKeyGPTModel    = "openai_gpt_model"
 	configKeyDALLEModel  = "openai_dalle_model"
 	configKeyAPIVersion  = "api_version"
+	configKeyLegacyMode  = "legacy_mode"
 )
 
 // Provider type constants
@@ -66,6 +78,7 @@ func NewModule() *Module {
 		genConfigOption(configKeyGPTModel, "GPT model name", empty),
 		genConfigOption(configKeyDALLEModel, "DALL-E model name", empty),
 		genConfigOption(configKeyAPIVersion, "API version", defaultAPIVersion),
+		genConfigOption(configKeyLegacyMode, "Use legacy mode for data conversion", true),
 	)
 }
 
@@ -83,12 +96,13 @@ func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleMo
 		genConfigOption(configKeyGPTModel, "GPT model name with preset value", gptModel),
 		genConfigOption(configKeyDALLEModel, "DALL-E model name with preset value", dalleModel),
 		genConfigOption(configKeyAPIVersion, "API version with preset value", apiVersion),
+		genConfigOption(configKeyLegacyMode, "Use legacy mode for data conversion", true),
 	)
 }
 
 // genConfigOption creates a configuration option with common settings.
 // It sets up the name, description, default value, and environment variable.
-func genConfigOption(name, description, defaultValue string) *base.ConfigOption[string] {
+func genConfigOption[T any](name, description string, defaultValue T) *base.ConfigOption[T] {
 	return base.NewConfigOption(defaultValue).
 		WithName(name).
 		WithDescription(description).
@@ -96,7 +110,7 @@ func genConfigOption(name, description, defaultValue string) *base.ConfigOption[
 }
 
 // newModuleWithOptions creates a Module with the given configuration options.
-func newModuleWithOptions(providerOpt, endpointOpt, apiKeyOpt, gptModelOpt, dalleModelOpt, apiVersionOpt *base.ConfigOption[string]) *Module {
+func newModuleWithOptions(providerOpt, endpointOpt, apiKeyOpt, gptModelOpt, dalleModelOpt, apiVersionOpt *base.ConfigOption[string], legacyModeOpt *base.ConfigOption[bool]) *Module {
 	cm, _ := base.NewConfigurableModuleWithConfigOptions(
 		providerOpt,
 		endpointOpt,
@@ -104,6 +118,7 @@ func newModuleWithOptions(providerOpt, endpointOpt, apiKeyOpt, gptModelOpt, dall
 		gptModelOpt,
 		dalleModelOpt,
 		apiVersionOpt,
+		legacyModeOpt,
 	)
 	return &Module{
 		cfgMod: cm,
@@ -240,7 +255,7 @@ func (m *Module) genDrawFunc() starlark.Callable {
 
 		// return the response: if fullResponse is set, return the full response, otherwise return the content
 		if fullResponse {
-			return convertGoToStarlark(resp)
+			return m.convertGoToStarlark(&resp)
 		}
 
 		// if numOfChoices is 1, return the content string, otherwise return a list of contents
@@ -337,7 +352,7 @@ func (m *Module) genChatFunc() starlark.Callable {
 		}
 
 		// convert to OpenAI chat messages
-		chatMessages, err := messagesToChatMessages(allMsgs)
+		chatMessages, err := m.messagesToChatMessages(allMsgs)
 		if err != nil {
 			return none, err
 		}
@@ -402,7 +417,7 @@ func (m *Module) genChatFunc() starlark.Callable {
 
 		// return the response: if fullResponse is set, return the full response, otherwise return the content
 		if fullResponse {
-			return convertGoToStarlark(resp)
+			return m.convertGoToStarlark(&resp)
 		}
 		if len(resp.Choices) == 0 {
 			return none, nil
@@ -538,7 +553,7 @@ func imageDataToBase64(data []byte) string {
 }
 
 // messagesToChatMessages converts a list of messages in starlark Dictionary to a list of OpenAI chat messages.
-func messagesToChatMessages(msgs []*starlark.Dict) ([]oai.ChatCompletionMessage, error) {
+func (m *Module) messagesToChatMessages(msgs []*starlark.Dict) ([]oai.ChatCompletionMessage, error) {
 	var res []oai.ChatCompletionMessage
 	for i, md := range msgs {
 		msg := oai.ChatCompletionMessage{}
@@ -617,54 +632,16 @@ func messagesToChatMessages(msgs []*starlark.Dict) ([]oai.ChatCompletionMessage,
 }
 
 // convertGoToStarlark converts a Go struct to a Starlark value using JSON marshaling.
-func convertGoToStarlark(v interface{}) (starlark.Value, error) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return none, err
+// When legacy mode is enabled (default), it uses ConvertJSONStruct which provides
+// direct struct access. When disabled, it uses GoToStarlarkViaJSON which creates
+// a JSON representation.
+func (m *Module) convertGoToStarlark(v interface{}) (starlark.Value, error) {
+	// Check legacy mode setting
+	if m.ext.GetBool(configKeyLegacyMode, true) {
+		// Legacy mode: direct struct access
+		return dataconv.ConvertJSONStruct(v), nil
 	}
 
-	var jsonValue interface{}
-	if err := json.Unmarshal(data, &jsonValue); err != nil {
-		return none, err
-	}
-
-	return convertJSONValueToStarlark(jsonValue)
-}
-
-// convertJSONValueToStarlark converts a JSON value to a Starlark value.
-func convertJSONValueToStarlark(v interface{}) (starlark.Value, error) {
-	switch x := v.(type) {
-	case nil:
-		return none, nil
-	case bool:
-		return starlark.Bool(x), nil
-	case float64:
-		return starlark.Float(x), nil
-	case string:
-		return starlark.String(x), nil
-	case []interface{}:
-		elems := make([]starlark.Value, len(x))
-		for i, elem := range x {
-			var err error
-			elems[i], err = convertJSONValueToStarlark(elem)
-			if err != nil {
-				return none, err
-			}
-		}
-		return starlark.NewList(elems), nil
-	case map[string]interface{}:
-		dict := starlark.NewDict(len(x))
-		for k, v := range x {
-			val, err := convertJSONValueToStarlark(v)
-			if err != nil {
-				return none, err
-			}
-			if err := dict.SetKey(starlark.String(k), val); err != nil {
-				return none, err
-			}
-		}
-		return dict, nil
-	default:
-		return none, fmt.Errorf("unsupported JSON value type: %T", v)
-	}
+	// Modern mode: JSON-based conversion
+	return dataconv.GoToStarlarkViaJSON(v)
 }
