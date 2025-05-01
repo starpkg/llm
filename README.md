@@ -9,6 +9,7 @@ A powerful Starlark module for interacting with OpenAI and OpenAI-compatible API
 - Support for OpenAI API
 - Support for Azure OpenAI services
 - Support for multimodal inputs (text and images)
+- **Streaming mode** for real-time responses
 - Customizable retry behavior and error handling
 
 ## Installation
@@ -74,7 +75,7 @@ print("Image URL:", image_url)
 
 The module has the following configuration options:
 
-- `openai_provider`: The provider type ("openai" or "azure")
+- `openai_provider`: The provider type ("openai", "azure", or "anthropic")
 - `openai_endpoint_url`: The API endpoint URL (required for Azure, optional for OpenAI)
 - `openai_api_key`: The API key (required)
 - `openai_gpt_model`: The default GPT model to use
@@ -94,7 +95,7 @@ Creates a message object for the chat function. Parameters:
 
 Returns a dictionary representing the message.
 
-#### `chat(text?, image?, image_file?, image_url?, messages?, model?, n?, max_tokens?, temperature?, top_p?, frequency_penalty?, presence_penalty?, stop?, response_format?, retry?, full_response?, allow_error?)`
+#### `chat(text?, image?, image_file?, image_url?, messages?, model?, n?, max_tokens?, temperature?, top_p?, frequency_penalty?, presence_penalty?, stop?, response_format?, retry?, full_response?, allow_error?, stream?, stream_callback?)`
 
 Sends a chat completion request to the OpenAI API. Parameters:
 
@@ -115,8 +116,10 @@ Sends a chat completion request to the OpenAI API. Parameters:
 - `retry`: Number of retry attempts (default: 1)
 - `full_response`: Return the full API response (default: false)
 - `allow_error`: Return None instead of an error (default: false)
+- `stream`: Enable streaming mode (default: false)
+- `stream_callback`: Function to call for each chunk in streaming mode
 
-Returns the generated text or a list of generated texts if `n > 1`.
+Returns the generated text or a list of generated texts if `n > 1`. In streaming mode, the return value is constructed by combining all chunks. When `full_response=True` in streaming mode, the response includes token usage information accumulated from all stream chunks.
 
 #### `draw(prompt, model?, n?, quality?, size?, style?, response_format?, retry?, full_response?, allow_error?)`
 
@@ -170,6 +173,100 @@ image_url = draw(
     size="1024x1024",
 )
 print(image_url)
+```
+
+### Streaming Mode
+
+```python
+load("llm", "chat")
+
+# Function to handle each chunk of the response
+def handle_chunk(chunk):
+    # Access the delta content from the first choice
+    if len(chunk.choices) > 0:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            # Print each chunk as it arrives
+            print(delta.content, end="", flush=True)
+
+# Stream response with a callback
+full_response = chat(
+    text="Write a short poem about coding in Python, one line at a time.",
+    max_tokens=200,
+    stream=True,
+    stream_callback=handle_chunk,
+)
+
+# The full_response contains the complete aggregated text
+print("\n\nFull response:", full_response)
+```
+
+### Streaming with Progress Tracking
+
+```python
+load("llm", "chat")
+
+# Create a simple progress tracker
+tracker = {
+    "tokens": 0,
+    "started": False,
+    "done": False
+}
+
+def process_chunk(chunk):
+    if not tracker["started"]:
+        print("Generating response...")
+        tracker["started"] = True
+    
+    # Count tokens received
+    if len(chunk.choices) > 0:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            tracker["tokens"] += 1
+            
+            # Show progress
+            if tracker["tokens"] % 10 == 0:
+                print(".", end="", flush=True)
+
+# Generate a longer response with progress tracking
+response = chat(
+    text="Explain how transformers work in machine learning, with detailed technical information.",
+    max_tokens=500,
+    stream=True,
+    stream_callback=process_chunk
+)
+
+print("\nDone! Received", tracker["tokens"], "chunks.")
+print("\nFinal response:\n", response)
+```
+
+### Accessing Token Usage Information
+
+```python
+load("llm", "chat")
+
+# Get the full response with token usage information
+full_resp = chat(
+    text="Explain the concept of transfer learning in AI.",
+    max_tokens=300,
+    stream=True,
+    full_response=True
+)
+
+# Access token usage information
+if hasattr(full_resp, "usage"):
+    usage = full_resp.usage
+    print(f"Prompt tokens: {usage.prompt_tokens}")
+    print(f"Completion tokens: {usage.completion_tokens}")
+    print(f"Total tokens: {usage.total_tokens}")
+    
+    # Calculate approximate cost (example rates for gpt-4)
+    # Note: Token counts are accumulated from all stream responses for better accuracy
+    prompt_cost = usage.prompt_tokens * 0.00003  # $0.03 per 1000 tokens
+    completion_cost = usage.completion_tokens * 0.00006  # $0.06 per 1000 tokens
+    total_cost = prompt_cost + completion_cost
+    
+    print(f"Approximate cost: ${total_cost:.6f}")
 ```
 
 ### Multimodal Interaction
