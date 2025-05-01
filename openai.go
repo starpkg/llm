@@ -386,8 +386,40 @@ func (m *Module) genChatFunc() starlark.Callable {
 			return m.handleStreamingRequest(ctx, cli, req, model, thread, params)
 		}
 
-		return m.handleNonStreamingRequest(ctx, cli, req, params)
+		return m.handleBlockingRequest(ctx, cli, req, params)
 	})
+}
+
+// handleBlockingRequest processes a blocking (non-streaming) chat completion request
+func (m *Module) handleBlockingRequest(ctx context.Context, cli *oai.Client, req oai.ChatCompletionRequest, params *chatParams) (starlark.Value, error) {
+	var resp oai.ChatCompletionResponse
+	var err error
+
+	// Try the request with retries
+	for i := 0; i < params.retryTimes; i++ {
+		resp, err = cli.CreateChatCompletion(ctx, req)
+
+		// If successful, break the loop
+		if err == nil {
+			break
+		}
+
+		// Check if this is a bad request error (no need to retry)
+		var ae *oai.APIError
+		if errors.As(err, &ae) && ae != nil && ae.HTTPStatusCode == http.StatusBadRequest {
+			break
+		}
+	}
+
+	// Handle error
+	if err != nil {
+		if params.allowError {
+			return none, nil
+		}
+		return none, err
+	}
+
+	return m.formatChatResponse(&resp, params)
 }
 
 // parseChatParams parses and validates the parameters for a chat completion request
@@ -619,38 +651,6 @@ func (m *Module) callStreamCallback(thread *starlark.Thread, callback starlark.C
 	}
 
 	return nil
-}
-
-// handleNonStreamingRequest processes a non-streaming chat completion request
-func (m *Module) handleNonStreamingRequest(ctx context.Context, cli *oai.Client, req oai.ChatCompletionRequest, params *chatParams) (starlark.Value, error) {
-	var resp oai.ChatCompletionResponse
-	var err error
-
-	// Try the request with retries
-	for i := 0; i < params.retryTimes; i++ {
-		resp, err = cli.CreateChatCompletion(ctx, req)
-
-		// If successful, break the loop
-		if err == nil {
-			break
-		}
-
-		// Check if this is a bad request error (no need to retry)
-		var ae *oai.APIError
-		if errors.As(err, &ae) && ae != nil && ae.HTTPStatusCode == http.StatusBadRequest {
-			break
-		}
-	}
-
-	// Handle error
-	if err != nil {
-		if params.allowError {
-			return none, nil
-		}
-		return none, err
-	}
-
-	return m.formatChatResponse(&resp, params)
 }
 
 // formatChatResponse formats the chat completion response according to parameters
