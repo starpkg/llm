@@ -13,6 +13,10 @@
 //   - In blocking mode (default), the function waits for the complete response
 //   - In streaming mode (stream=True), responses are received incrementally and can be processed via a callback
 //   - Streaming mode can improve responsiveness for large responses or when displaying partial results is desired
+//   - To use streaming mode, set stream=True and optionally provide stream_callback=function
+//   - The stream_callback receives each chunk of the response as it arrives
+//   - In both streaming and blocking modes, the function returns the same format: either the complete content or full response
+//   - For streaming, the content is automatically aggregated from all chunks
 //
 // When legacy_mode is true (default), response objects are converted using direct struct
 // access (ConvertJSONStruct). When false, JSON conversion is used (GoToStarlarkViaJSON).
@@ -20,6 +24,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -73,6 +78,51 @@ type Module struct {
 	cfgMod *base.ConfigurableModule
 	ext    *base.ConfigurableModuleExt
 	cli    *oai.Client
+}
+
+// chatParams contains all the parameters required for a chat completion request
+type chatParams struct {
+	// Message params
+	msgText       *types.NullableStringOrBytes
+	msgImageBytes *types.NullableStringOrBytes
+	msgImageFile  *types.NullableStringOrBytes
+	msgImageURL   *types.NullableStringOrBytes
+	messages      *types.OneOrMany[*starlark.Dict]
+
+	// Model request params
+	userModel        *types.NullableStringOrBytes
+	numOfChoices     int
+	maxTokens        int
+	temperature      types.FloatOrInt
+	topP             types.FloatOrInt
+	frequencyPenalty types.FloatOrInt
+	presencePenalty  types.FloatOrInt
+	stopSequences    *types.OneOrMany[starlark.String]
+	responseFormat   *types.NullableStringOrBytes
+
+	// Call params
+	retryTimes   int
+	fullResponse bool
+	allowError   bool
+
+	// Stream params
+	stream         bool
+	streamCallback starlark.Callable
+}
+
+// chatResult represents the result of a chat completion request
+type chatResult struct {
+	id      string
+	model   string
+	choices []chatChoice
+}
+
+// chatChoice represents a single choice in a chat completion response
+type chatChoice struct {
+	index        int
+	content      string
+	role         string
+	finishReason string
 }
 
 // NewModule creates a new instance of Module with default empty configurations.
@@ -300,275 +350,332 @@ func (m *Module) genDrawFunc() starlark.Callable {
 	})
 }
 
+// genChatFunc returns a Starlark callable for interacting with OpenAI's chat completion API
 func (m *Module) genChatFunc() starlark.Callable {
 	return starlark.NewBuiltin(ModuleName+".chat", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-		var (
-			// message
-			msgText       = types.NewNullableStringOrBytesNoDefault()
-			msgImageBytes = types.NewNullableStringOrBytesNoDefault()
-			msgImageFile  = types.NewNullableStringOrBytesNoDefault()
-			msgImageURL   = types.NewNullableStringOrBytesNoDefault()
-			messages      = types.NewOneOrManyNoDefault[*starlark.Dict]()
-			// model request
-			userModel        = types.NewNullableStringOrBytesNoDefault()
-			numOfChoices     = 1
-			maxTokens        = 64
-			temperature      = types.FloatOrInt(1.0)
-			topP             = types.FloatOrInt(1.0)
-			frequencyPenalty = types.FloatOrInt(0.0)
-			presencePenalty  = types.FloatOrInt(0.0)
-			stopSequences    = types.NewOneOrManyNoDefault[starlark.String]()
-			responseFormat   = types.NewNullableStringOrBytes("text")
-			// call
-			retryTimes   = 1
-			fullResponse = false
-			allowError   = false
-			// stream
-			stream         = false
-			streamCallback starlark.Callable
-		)
-		if err := starlark.UnpackArgs(b.Name(), args, kwargs,
-			"text?", msgText, "image?", msgImageBytes, "image_file?", msgImageFile, "image_url?", msgImageURL, "messages?", messages,
-			"model?", userModel, "n?", &numOfChoices, "max_tokens?", &maxTokens, "temperature?", &temperature, "top_p?", &topP, "frequency_penalty?", &frequencyPenalty, "presence_penalty?", &presencePenalty, "stop?", stopSequences, "response_format?", responseFormat,
-			"retry?", &retryTimes, "full_response?", &fullResponse, "allow_error?", &allowError,
-			"stream?", &stream, "stream_callback?", &streamCallback,
-		); err != nil {
+		// Parse and validate parameters
+		params, err := m.parseChatParams(b, args, kwargs)
+		if err != nil {
 			return none, err
 		}
 
-		// get model
-		model := m.getModel(configKeyGPTModel, userModel.GoString())
+		// Get model and validate it
+		model := m.getModel(configKeyGPTModel, params.userModel.GoString())
 		if model == "" {
 			return none, errors.New("gpt model is not set")
 		}
 
-		// history messages, prepend user message if defined
-		allMsgs := messages.Slice()
-		usrMd := starlark.NewDict(1)
-		prepared := map[string]*types.NullableStringOrBytes{
-			"text":       msgText,
-			"image":      msgImageBytes,
-			"image_file": msgImageFile,
-			"image_url":  msgImageURL,
-		}
-		for key, val := range prepared {
-			if !val.IsNullOrEmpty() {
-				usrMd.SetKey(starlark.String(key), val.StarlarkString())
-			}
-		}
-		if usrMd.Len() > 0 {
-			usrMd.SetKey(starlark.String("role"), starlark.String(oai.ChatMessageRoleUser))
-			allMsgs = append([]*starlark.Dict{usrMd}, allMsgs...)
-		}
-
-		// convert to OpenAI chat messages
-		chatMessages, err := m.messagesToChatMessages(allMsgs)
+		// Prepare messages and chat completion request
+		allMsgs := m.prepareMessages(params)
+		req, err := m.prepareChatRequest(allMsgs, model, params)
 		if err != nil {
 			return none, err
 		}
-		var stopWords []string
-		for _, s := range stopSequences.Slice() {
-			stopWords = append(stopWords, s.GoString())
-		}
-		req := oai.ChatCompletionRequest{
-			Model:            model,
-			Messages:         chatMessages,
-			MaxTokens:        maxTokens,
-			Temperature:      temperature.GoFloat32(),
-			TopP:             topP.GoFloat32(),
-			N:                numOfChoices,
-			Stop:             stopWords,
-			PresencePenalty:  presencePenalty.GoFloat32(),
-			FrequencyPenalty: frequencyPenalty.GoFloat32(),
-			Stream:           stream,
-		}
-		if rf := responseFormat.GoString(); rf == "json" {
-			req.ResponseFormat = &oai.ChatCompletionResponseFormat{
-				Type: oai.ChatCompletionResponseFormatTypeJSONObject,
-			}
-		} else if rf == "text" {
-			req.ResponseFormat = &oai.ChatCompletionResponseFormat{
-				Type: oai.ChatCompletionResponseFormatTypeText,
-			}
-		} else {
-			return none, fmt.Errorf("unsupported response format: %s", rf)
-		}
 
-		// get client
+		// Get client
 		cli, err := m.getClient(model)
 		if err != nil {
 			return nil, err
 		}
 
-		// send request to provider
+		// Context from Starlark thread
 		ctx := dataconv.GetThreadContext(thread)
 
-		// Handle streaming mode
-		if stream {
-			// Create a streamed chat completion
-			var (
-				streamResp oai.ChatCompletionStreamResponse
-				streamErr  error
-			)
-
-			for i := 0; i < retryTimes; i++ {
-				// Create a stream for chat completion
-				stream, err := cli.CreateChatCompletionStream(ctx, req)
-				if err == nil {
-					defer stream.Close()
-
-					// Process the stream
-					var fullResp oai.ChatCompletionResponse
-					fullResp.Model = model
-					// Initialize choices based on number of choices requested
-					fullResp.Choices = make([]oai.ChatCompletionChoice, numOfChoices)
-					contentBuilders := make([]strings.Builder, numOfChoices)
-
-					for {
-						// Receive the next response
-						streamResp, streamErr = stream.Recv()
-						if streamErr != nil {
-							if streamErr == io.EOF {
-								streamErr = nil // End of stream is not an error
-								break
-							}
-							break // Break on error
-						}
-
-						// Store the ID from the first response
-						if fullResp.ID == "" && streamResp.ID != "" {
-							fullResp.ID = streamResp.ID
-						}
-
-						// Process each choice in the stream response
-						for i, choice := range streamResp.Choices {
-							if i < len(contentBuilders) {
-								// Append the delta content to the builder
-								contentBuilders[i].WriteString(choice.Delta.Content)
-
-								// Initialize the choice in the full response if not done yet
-								if fullResp.Choices[i].Message.Role == "" {
-									fullResp.Choices[i].Message.Role = choice.Delta.Role
-									if choice.Delta.Role == "" {
-										fullResp.Choices[i].Message.Role = oai.ChatMessageRoleAssistant
-									}
-								}
-
-								// Set index and finish reason if provided
-								fullResp.Choices[i].Index = choice.Index
-								if choice.FinishReason != "" {
-									fullResp.Choices[i].FinishReason = choice.FinishReason
-								}
-							}
-						}
-
-						// Call the stream callback if provided
-						if streamCallback != nil {
-							// Convert the stream response to Starlark
-							starlarkResp, err := m.convertGoToStarlark(&streamResp)
-							if err != nil {
-								return none, fmt.Errorf("failed to convert stream response to Starlark: %w", err)
-							}
-
-							// Call the callback with the response
-							if _, err := starlark.Call(thread, streamCallback, starlark.Tuple{starlarkResp}, nil); err != nil {
-								return none, fmt.Errorf("stream callback error: %w", err)
-							}
-						}
-					}
-
-					// If we finished the stream successfully, build the full response
-					if streamErr == nil || streamErr == io.EOF {
-						// Combine the content from each chunk
-						for i := range fullResp.Choices {
-							if i < len(contentBuilders) {
-								fullResp.Choices[i].Message.Content = contentBuilders[i].String()
-							}
-						}
-
-						// If we got a response, handle it as the final result
-						if fullResponse {
-							return m.convertGoToStarlark(&fullResp)
-						}
-
-						// Otherwise, return just the content
-						if len(fullResp.Choices) == 0 {
-							return none, nil
-						}
-
-						// If numOfChoices is 1, return the content string, otherwise return a list of contents
-						if numOfChoices == 1 {
-							return starlark.String(fullResp.Choices[0].Message.Content), nil
-						}
-
-						var res []starlark.Value
-						for _, ch := range fullResp.Choices {
-							res = append(res, starlark.String(ch.Message.Content))
-						}
-						return starlark.NewList(res), nil
-					}
-
-					break // We got an error or EOF
-				}
-
-				// Check if this is a bad request error (no need to retry)
-				var ae *oai.APIError
-				if errors.As(err, &ae) && ae != nil && ae.HTTPStatusCode == http.StatusBadRequest {
-					break
-				}
-			}
-
-			// Handle stream error
-			if streamErr != nil {
-				if allowError {
-					return none, nil
-				}
-				return none, streamErr
-			}
+		// Handle request based on streaming mode
+		if params.stream {
+			return m.handleStreamingRequest(ctx, cli, req, model, thread, params)
 		}
 
-		// Non-streaming mode (original implementation)
-		var resp oai.ChatCompletionResponse
-		for i := 0; i < retryTimes; i++ {
-			resp, err = cli.CreateChatCompletion(ctx, req)
-			// if no error, break the loop, got the response
-			if err == nil {
-				break
-			}
-			// if the error is a bad request, break the loop, no need to retry
-			var ae *oai.APIError
-			if errors.As(err, &ae) && ae != nil {
-				if ae.HTTPStatusCode == http.StatusBadRequest {
-					break
-				}
-			}
+		return m.handleNonStreamingRequest(ctx, cli, req, params)
+	})
+}
+
+// parseChatParams parses and validates the parameters for a chat completion request
+func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (*chatParams, error) {
+	p := &chatParams{
+		// Default values
+		msgText:          types.NewNullableStringOrBytesNoDefault(),
+		msgImageBytes:    types.NewNullableStringOrBytesNoDefault(),
+		msgImageFile:     types.NewNullableStringOrBytesNoDefault(),
+		msgImageURL:      types.NewNullableStringOrBytesNoDefault(),
+		messages:         types.NewOneOrManyNoDefault[*starlark.Dict](),
+		userModel:        types.NewNullableStringOrBytesNoDefault(),
+		numOfChoices:     1,
+		maxTokens:        64,
+		temperature:      types.FloatOrInt(1.0),
+		topP:             types.FloatOrInt(1.0),
+		frequencyPenalty: types.FloatOrInt(0.0),
+		presencePenalty:  types.FloatOrInt(0.0),
+		stopSequences:    types.NewOneOrManyNoDefault[starlark.String](),
+		responseFormat:   types.NewNullableStringOrBytes("text"),
+		retryTimes:       1,
+		fullResponse:     false,
+		allowError:       false,
+		stream:           false,
+	}
+
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
+		"text?", p.msgText, "image?", p.msgImageBytes, "image_file?", p.msgImageFile, "image_url?", p.msgImageURL, "messages?", p.messages,
+		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty, "stop?", p.stopSequences, "response_format?", p.responseFormat,
+		"retry?", &p.retryTimes, "full_response?", &p.fullResponse, "allow_error?", &p.allowError,
+		"stream?", &p.stream, "stream_callback?", &p.streamCallback,
+	); err != nil {
+		return nil, err
+	}
+
+	return p, nil
+}
+
+// prepareMessages constructs a list of messages for the chat completion API
+func (m *Module) prepareMessages(params *chatParams) []*starlark.Dict {
+	allMsgs := params.messages.Slice()
+
+	// Create user message from parameters if provided
+	usrMd := starlark.NewDict(1)
+	prepared := map[string]*types.NullableStringOrBytes{
+		"text":       params.msgText,
+		"image":      params.msgImageBytes,
+		"image_file": params.msgImageFile,
+		"image_url":  params.msgImageURL,
+	}
+
+	for key, val := range prepared {
+		if !val.IsNullOrEmpty() {
+			usrMd.SetKey(starlark.String(key), val.StarlarkString())
+		}
+	}
+
+	// Add the user message to the beginning of the list if it has content
+	if usrMd.Len() > 0 {
+		usrMd.SetKey(starlark.String("role"), starlark.String(oai.ChatMessageRoleUser))
+		allMsgs = append([]*starlark.Dict{usrMd}, allMsgs...)
+	}
+
+	return allMsgs
+}
+
+// prepareChatRequest builds a chat completion request from messages and parameters
+func (m *Module) prepareChatRequest(allMsgs []*starlark.Dict, model string, params *chatParams) (oai.ChatCompletionRequest, error) {
+	// Convert Starlark messages to OpenAI chat messages
+	chatMessages, err := m.messagesToChatMessages(allMsgs)
+	if err != nil {
+		return oai.ChatCompletionRequest{}, err
+	}
+
+	// Convert stop sequences
+	var stopWords []string
+	for _, s := range params.stopSequences.Slice() {
+		stopWords = append(stopWords, s.GoString())
+	}
+
+	// Build request
+	req := oai.ChatCompletionRequest{
+		Model:            model,
+		Messages:         chatMessages,
+		MaxTokens:        params.maxTokens,
+		Temperature:      params.temperature.GoFloat32(),
+		TopP:             params.topP.GoFloat32(),
+		N:                params.numOfChoices,
+		Stop:             stopWords,
+		PresencePenalty:  params.presencePenalty.GoFloat32(),
+		FrequencyPenalty: params.frequencyPenalty.GoFloat32(),
+		Stream:           params.stream,
+	}
+
+	// Set response format
+	if rf := params.responseFormat.GoString(); rf == "json" {
+		req.ResponseFormat = &oai.ChatCompletionResponseFormat{
+			Type: oai.ChatCompletionResponseFormatTypeJSONObject,
+		}
+	} else if rf == "text" {
+		req.ResponseFormat = &oai.ChatCompletionResponseFormat{
+			Type: oai.ChatCompletionResponseFormatTypeText,
+		}
+	} else {
+		return oai.ChatCompletionRequest{}, fmt.Errorf("unsupported response format: %s", rf)
+	}
+
+	return req, nil
+}
+
+// handleStreamingRequest processes a streaming chat completion request
+func (m *Module) handleStreamingRequest(ctx context.Context, cli *oai.Client, req oai.ChatCompletionRequest, model string, thread *starlark.Thread, params *chatParams) (starlark.Value, error) {
+	var streamErr error
+	var fullResp *oai.ChatCompletionResponse
+
+	// Try the request with retries
+	for i := 0; i < params.retryTimes; i++ {
+		fullResp, streamErr = m.processStream(ctx, cli, req, model, thread, params)
+
+		// If successful, return the result
+		if streamErr == nil {
+			return m.formatChatResponse(fullResp, params)
 		}
 
-		// handle error: if allowError is set, return None, otherwise return the error
-		if err != nil {
-			if allowError {
-				return none, nil
-			}
-			return none, err
+		// Check if this is a bad request error (no need to retry)
+		var ae *oai.APIError
+		if errors.As(streamErr, &ae) && ae != nil && ae.HTTPStatusCode == http.StatusBadRequest {
+			break
 		}
+	}
 
-		// return the response: if fullResponse is set, return the full response, otherwise return the content
-		if fullResponse {
-			return m.convertGoToStarlark(&resp)
-		}
-		if len(resp.Choices) == 0 {
+	// Handle error
+	if streamErr != nil {
+		if params.allowError {
 			return none, nil
 		}
-		// if numOfChoices is 1, return the content string, otherwise return a list of contents
-		if numOfChoices == 1 {
-			return starlark.String(resp.Choices[0].Message.Content), nil
+		return none, streamErr
+	}
+
+	return none, nil
+}
+
+// processStream handles a single streaming request attempt
+func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.ChatCompletionRequest, model string, thread *starlark.Thread, params *chatParams) (*oai.ChatCompletionResponse, error) {
+	// Create a stream for chat completion
+	stream, err := cli.CreateChatCompletionStream(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+
+	// Initialize the full response
+	fullResp := &oai.ChatCompletionResponse{
+		Model:   model,
+		Choices: make([]oai.ChatCompletionChoice, params.numOfChoices),
+	}
+
+	// Initialize content builders for each choice
+	contentBuilders := make([]strings.Builder, params.numOfChoices)
+
+	// Process the stream
+	for {
+		// Receive the next response
+		streamResp, streamErr := stream.Recv()
+		if streamErr != nil {
+			if streamErr == io.EOF {
+				// End of stream is not an error
+				break
+			}
+			return nil, streamErr
 		}
-		var res []starlark.Value
-		for _, ch := range resp.Choices {
-			res = append(res, starlark.String(ch.Message.Content))
+
+		// Store the ID from the first response
+		if fullResp.ID == "" && streamResp.ID != "" {
+			fullResp.ID = streamResp.ID
 		}
-		return starlark.NewList(res), nil
-	})
+
+		// Process each choice in the stream response
+		for i, choice := range streamResp.Choices {
+			if i < len(contentBuilders) {
+				// Append the delta content to the builder
+				contentBuilders[i].WriteString(choice.Delta.Content)
+
+				// Initialize the choice in the full response if not done yet
+				if fullResp.Choices[i].Message.Role == "" {
+					fullResp.Choices[i].Message.Role = choice.Delta.Role
+					if choice.Delta.Role == "" {
+						fullResp.Choices[i].Message.Role = oai.ChatMessageRoleAssistant
+					}
+				}
+
+				// Set index and finish reason if provided
+				fullResp.Choices[i].Index = choice.Index
+				if choice.FinishReason != "" {
+					fullResp.Choices[i].FinishReason = choice.FinishReason
+				}
+			}
+		}
+
+		// Call the stream callback if provided
+		if params.streamCallback != nil {
+			if err := m.callStreamCallback(thread, params.streamCallback, &streamResp); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Combine the content from each chunk
+	for i := range fullResp.Choices {
+		if i < len(contentBuilders) {
+			fullResp.Choices[i].Message.Content = contentBuilders[i].String()
+		}
+	}
+
+	return fullResp, nil
+}
+
+// callStreamCallback invokes the provided callback with a stream response
+func (m *Module) callStreamCallback(thread *starlark.Thread, callback starlark.Callable, resp *oai.ChatCompletionStreamResponse) error {
+	// Convert the stream response to Starlark
+	starlarkResp, err := m.convertGoToStarlark(resp)
+	if err != nil {
+		return fmt.Errorf("failed to convert stream response to Starlark: %w", err)
+	}
+
+	// Call the callback with the response
+	if _, err := starlark.Call(thread, callback, starlark.Tuple{starlarkResp}, nil); err != nil {
+		return fmt.Errorf("stream callback error: %w", err)
+	}
+
+	return nil
+}
+
+// handleNonStreamingRequest processes a non-streaming chat completion request
+func (m *Module) handleNonStreamingRequest(ctx context.Context, cli *oai.Client, req oai.ChatCompletionRequest, params *chatParams) (starlark.Value, error) {
+	var resp oai.ChatCompletionResponse
+	var err error
+
+	// Try the request with retries
+	for i := 0; i < params.retryTimes; i++ {
+		resp, err = cli.CreateChatCompletion(ctx, req)
+
+		// If successful, break the loop
+		if err == nil {
+			break
+		}
+
+		// Check if this is a bad request error (no need to retry)
+		var ae *oai.APIError
+		if errors.As(err, &ae) && ae != nil && ae.HTTPStatusCode == http.StatusBadRequest {
+			break
+		}
+	}
+
+	// Handle error
+	if err != nil {
+		if params.allowError {
+			return none, nil
+		}
+		return none, err
+	}
+
+	return m.formatChatResponse(&resp, params)
+}
+
+// formatChatResponse formats the chat completion response according to parameters
+func (m *Module) formatChatResponse(resp *oai.ChatCompletionResponse, params *chatParams) (starlark.Value, error) {
+	// Return the full response if requested
+	if params.fullResponse {
+		return m.convertGoToStarlark(resp)
+	}
+
+	// Check if we have choices
+	if len(resp.Choices) == 0 {
+		return none, nil
+	}
+
+	// For a single choice, return the content string
+	if params.numOfChoices == 1 {
+		return starlark.String(resp.Choices[0].Message.Content), nil
+	}
+
+	// For multiple choices, return a list of contents
+	var res []starlark.Value
+	for _, ch := range resp.Choices {
+		res = append(res, starlark.String(ch.Message.Content))
+	}
+	return starlark.NewList(res), nil
 }
 
 // SetClient sets the OpenAI client for this module.
