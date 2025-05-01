@@ -580,6 +580,13 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 	// Initialize content builders for each choice
 	contentBuilders := make([]strings.Builder, params.numOfChoices)
 
+	// Track metadata from stream responses
+	var lastStreamResp oai.ChatCompletionStreamResponse
+
+	// Initialize token usage accumulator
+	accumulatedUsage := oai.Usage{}
+	usageFound := false
+
 	// Process the stream
 	for {
 		// Receive the next response
@@ -592,9 +599,20 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 			return nil, streamErr
 		}
 
+		// Keep track of the last response for metadata
+		lastStreamResp = streamResp
+
 		// Store the ID from the first response
 		if fullResp.ID == "" && streamResp.ID != "" {
 			fullResp.ID = streamResp.ID
+		}
+
+		// Accumulate token usage from this chunk if available
+		if streamResp.Usage != nil {
+			usageFound = true
+			accumulatedUsage.PromptTokens += streamResp.Usage.PromptTokens
+			accumulatedUsage.CompletionTokens += streamResp.Usage.CompletionTokens
+			accumulatedUsage.TotalTokens += streamResp.Usage.TotalTokens
 		}
 
 		// Process each choice in the stream response
@@ -632,6 +650,25 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 		if i < len(contentBuilders) {
 			fullResp.Choices[i].Message.Content = contentBuilders[i].String()
 		}
+	}
+
+	// Use accumulated token usage if we found any
+	if usageFound {
+		fullResp.Usage = accumulatedUsage
+	} else if lastStreamResp.Usage != nil {
+		// Fallback to the last response if we didn't accumulate anything
+		fullResp.Usage = *lastStreamResp.Usage
+	}
+
+	// Copy any available metadata from the last response
+	if lastStreamResp.Created > 0 {
+		fullResp.Created = lastStreamResp.Created
+	}
+	if lastStreamResp.Model != "" {
+		fullResp.Model = lastStreamResp.Model
+	}
+	if lastStreamResp.SystemFingerprint != "" {
+		fullResp.SystemFingerprint = lastStreamResp.SystemFingerprint
 	}
 
 	return fullResp, nil

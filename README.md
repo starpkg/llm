@@ -119,7 +119,7 @@ Sends a chat completion request to the OpenAI API. Parameters:
 - `stream`: Enable streaming mode (default: false)
 - `stream_callback`: Function to call for each chunk in streaming mode
 
-Returns the generated text or a list of generated texts if `n > 1`. In streaming mode, the return value is constructed by combining all chunks.
+Returns the generated text or a list of generated texts if `n > 1`. In streaming mode, the return value is constructed by combining all chunks. When `full_response=True` in streaming mode, the response includes token usage information accumulated from all stream chunks.
 
 #### `draw(prompt, model?, n?, quality?, size?, style?, response_format?, retry?, full_response?, allow_error?)`
 
@@ -238,6 +238,35 @@ response = chat(
 
 print("\nDone! Received", tracker["tokens"], "chunks.")
 print("\nFinal response:\n", response)
+```
+
+### Accessing Token Usage Information
+
+```python
+load("llm", "chat")
+
+# Get the full response with token usage information
+full_resp = chat(
+    text="Explain the concept of transfer learning in AI.",
+    max_tokens=300,
+    stream=True,
+    full_response=True
+)
+
+# Access token usage information
+if hasattr(full_resp, "usage"):
+    usage = full_resp.usage
+    print(f"Prompt tokens: {usage.prompt_tokens}")
+    print(f"Completion tokens: {usage.completion_tokens}")
+    print(f"Total tokens: {usage.total_tokens}")
+    
+    # Calculate approximate cost (example rates for gpt-4)
+    # Note: Token counts are accumulated from all stream responses for better accuracy
+    prompt_cost = usage.prompt_tokens * 0.00003  # $0.03 per 1000 tokens
+    completion_cost = usage.completion_tokens * 0.00006  # $0.06 per 1000 tokens
+    total_cost = prompt_cost + completion_cost
+    
+    print(f"Approximate cost: ${total_cost:.6f}")
 ```
 
 ### Multimodal Interaction
