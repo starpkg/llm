@@ -17,12 +17,12 @@ github.com/montanaflynn/stats v0.7.1 h1:etflOAAHORrCC44V+aR6Ftzort912ZU+YLiSTuV8
 github.com/montanaflynn/stats v0.7.1/go.mod h1:etXPPgVO6n31NxCd9KQUMvCM+ve0ruNzt6R8Bnaayow=
 github.com/pkg/errors v0.8.1 h1:iURUrRGxPUNPdy5/HRSm+Yj6okJ6UtLINN0Q9M4+h3I=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
-github.com/sashabaranov/go-openai v1.38.1 h1:TtZabbFQZa1nEni/IhVtDF/WQjVqDgd+cWR5OeddzF8=
-github.com/sashabaranov/go-openai v1.38.1/go.mod h1:lj5b/K+zjTSFxVLijLSTDZuP7adOgerWeFyZLUhAKRg=
+github.com/sashabaranov/go-openai v1.39.0 h1:7Ubg/9njZlBJ8qFs6q5gExpfkAhy3E9VN3pciG7H6pY=
+github.com/sashabaranov/go-openai v1.39.0/go.mod h1:lj5b/K+zjTSFxVLijLSTDZuP7adOgerWeFyZLUhAKRg=
 github.com/spyzhov/ajson v0.9.6 h1:iJRDaLa+GjhCDAt1yFtU/LKMtLtsNVKkxqlpvrHHlpQ=
 github.com/spyzhov/ajson v0.9.6/go.mod h1:a6oSw0MMb7Z5aD2tPoPO+jq11ETKgXUr2XktHdT8Wt8=
-github.com/starpkg/base v0.0.3 h1:a4FC8/1reHv8a4hB4bXwKTJcCWsuF7BKqvm5pLgVClc=
-github.com/starpkg/base v0.0.3/go.mod h1:NV3OZtaqYEpYRTf3J5oW99DIVMYQl2Kz1moBJ93mws4=
+github.com/starpkg/base v0.0.4 h1:B3P0SEzRyhbU2KGEMhcaQAj1faMGOZeaarwcC66fdEw=
+github.com/starpkg/base v0.0.4/go.mod h1:NV3OZtaqYEpYRTf3J5oW99DIVMYQl2Kz1moBJ93mws4=
 github.com/stretchr/testify v1.8.0 h1:pSgiaMZlXftHpm5L7V1+rVB+AZJydKsMxsQBIJw4PKk=
 go.starlark.net v0.0.0-20240123142251-f86470692795 h1:LmbG8Pq7KDGkglKVn8VpZOZj6vb9b8nKEGcg9l03epM=
 go.starlark.net v0.0.0-20240123142251-f86470692795/go.mod h1:LcLNIzVOMp4oV+uusnpk+VU+SzXaJakUuBjoCSWH5dM=
