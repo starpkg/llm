@@ -756,7 +756,7 @@ func (m *Module) getClient(model string) (*oai.Client, error) {
 		} else {
 			cfg.BaseURL = "https://api.anthropic.com"
 		}
-	case ProviderOpenAI: // Vanilla OpenAI services
+	case ProviderOpenAI, empty: // Vanilla OpenAI services
 		cfg = oai.DefaultConfig(apiKey)
 		if endpointURL != "" {
 			cfg.BaseURL = endpointURL
