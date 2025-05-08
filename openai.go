@@ -521,6 +521,13 @@ func (m *Module) prepareChatRequest(allMsgs []*starlark.Dict, model string, para
 		Stream:           params.stream,
 	}
 
+	// Set StreamOptions with IncludeUsage for streaming requests
+	if params.stream {
+		req.StreamOptions = &oai.StreamOptions{
+			IncludeUsage: true,
+		}
+	}
+
 	// Set MaxCompletionTokens if provided (for o1 series models)
 	if params.maxCompletionTokens > 0 {
 		req.MaxCompletionTokens = params.maxCompletionTokens
