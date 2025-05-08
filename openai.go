@@ -20,7 +20,7 @@
 //
 // Token parameters for different models:
 //   - max_tokens: Maximum number of tokens to generate (default: 64) - works with most models
-//   - max_completion_tokens: Upper bound for generated completion tokens - required for o1 series models
+//   - max_completion_tokens: Upper bound for generated completion tokens - for o1 series models
 //   - For o1, o3, o4 series models, use max_completion_tokens instead of max_tokens
 //
 // When legacy_mode is true (default), response objects are converted using direct struct
