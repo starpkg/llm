@@ -105,6 +105,7 @@ type chatParams struct {
 	presencePenalty     types.FloatOrInt
 	stopSequences       *types.OneOrMany[starlark.String]
 	responseFormat      *types.NullableStringOrBytes
+	reasoningEffort     *types.NullableStringOrBytes
 
 	// Call params
 	retryTimes   int
@@ -447,6 +448,7 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 		presencePenalty:     types.FloatOrInt(0.0),
 		stopSequences:       types.NewOneOrManyNoDefault[starlark.String](),
 		responseFormat:      types.NewNullableStringOrBytes("text"),
+		reasoningEffort:     types.NewNullableStringOrBytesNoDefault(),
 		retryTimes:          1,
 		fullResponse:        false,
 		allowError:          false,
@@ -455,7 +457,7 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"text?", p.msgText, "image?", p.msgImageBytes, "image_file?", p.msgImageFile, "image_url?", p.msgImageURL, "messages?", p.messages,
-		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "max_completion_tokens?", &p.maxCompletionTokens, "temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty, "stop?", p.stopSequences, "response_format?", p.responseFormat,
+		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "max_completion_tokens?", &p.maxCompletionTokens, "temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty, "stop?", p.stopSequences, "response_format?", p.responseFormat, "reasoning_effort?", p.reasoningEffort,
 		"retry?", &p.retryTimes, "full_response?", &p.fullResponse, "allow_error?", &p.allowError,
 		"stream?", &p.stream, "stream_callback?", &p.streamCallback,
 	); err != nil {
@@ -519,6 +521,11 @@ func (m *Module) prepareChatRequest(allMsgs []*starlark.Dict, model string, para
 		PresencePenalty:  params.presencePenalty.GoFloat32(),
 		FrequencyPenalty: params.frequencyPenalty.GoFloat32(),
 		Stream:           params.stream,
+	}
+
+	// Set ReasoningEffort if provided
+	if !params.reasoningEffort.IsNullOrEmpty() {
+		req.ReasoningEffort = params.reasoningEffort.GoString()
 	}
 
 	// Set StreamOptions with IncludeUsage for streaming requests

@@ -114,6 +114,7 @@ Sends a chat completion request to the OpenAI API. Parameters:
 - `presence_penalty`: Presence penalty (default: 0.0)
 - `stop`: List of stop sequences
 - `response_format`: Format of the response ("text" or "json") (default: "text")
+- `reasoning_effort`: Controls reasoning effort for reasoning-capable models ("low", "medium", or "high")
 - `retry`: Number of retry attempts (default: 1)
 - `full_response`: Return the full API response (default: false)
 - `allow_error`: Return None instead of an error (default: false)
@@ -302,6 +303,33 @@ response = chat(
     max_tokens=200,
 )
 print(response)
+```
+
+### Using Reasoning Models
+
+```python
+load("llm", "chat")
+
+# Set endpoint and API key for a reasoning-capable model provider
+llm.set_openai_endpoint_url("https://reasoning-model-api-endpoint.com")
+llm.set_openai_api_key("your-api-key-here")
+
+# Call a reasoning-capable model with specific reasoning effort
+response = chat(
+    text="Solve this step by step: If 3x + 7 = 22, what is the value of x?",
+    model="reasoning-model-name",
+    reasoning_effort="high",  # Can be "low", "medium", or "high"
+    max_tokens=300,
+    full_response=True,
+)
+
+# If the model provides reasoning content, it will be available
+if hasattr(response.choices[0].message, "reasoning_content"):
+    print("Reasoning:")
+    print(response.choices[0].message.reasoning_content)
+    
+print("\nFinal answer:")
+print(response.choices[0].message.content)
 ```
 
 ## License
