@@ -95,7 +95,7 @@ Creates a message object for the chat function. Parameters:
 
 Returns a dictionary representing the message.
 
-#### `chat(text?, image?, image_file?, image_url?, messages?, model?, n?, max_tokens?, temperature?, top_p?, frequency_penalty?, presence_penalty?, stop?, response_format?, retry?, full_response?, allow_error?, stream?, stream_callback?)`
+#### `chat(text?, image?, image_file?, image_url?, messages?, model?, n?, max_tokens?, max_completion_tokens?, temperature?, top_p?, frequency_penalty?, presence_penalty?, stop?, response_format?, retry?, full_response?, allow_error?, stream?, stream_callback?)`
 
 Sends a chat completion request to the OpenAI API. Parameters:
 
@@ -106,7 +106,8 @@ Sends a chat completion request to the OpenAI API. Parameters:
 - `messages`: List of message dictionaries (from `message()` function)
 - `model`: Model to use (defaults to `openai_gpt_model` config)
 - `n`: Number of completions to generate (default: 1)
-- `max_tokens`: Maximum number of tokens to generate (default: 64)
+- `max_tokens`: Maximum number of tokens to generate (deprecated for O1 series models)
+- `max_completion_tokens`: Upper bound for generated completion tokens (for O1 series models)
 - `temperature`: Sampling temperature (default: 1.0)
 - `top_p`: Nucleus sampling parameter (default: 1.0)
 - `frequency_penalty`: Frequency penalty (default: 0.0)
