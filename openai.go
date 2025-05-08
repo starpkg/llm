@@ -20,8 +20,8 @@
 //
 // Token parameters for different models:
 //   - max_tokens: Maximum number of tokens to generate (default: 64) - works with most models
-//   - max_completion_tokens: Upper bound for generated completion tokens - required for O1 series models
-//   - For O1, O3, O4 series models, use max_completion_tokens instead of max_tokens
+//   - max_completion_tokens: Upper bound for generated completion tokens - required for o1 series models
+//   - For o1, o3, o4 series models, use max_completion_tokens instead of max_tokens
 //
 // When legacy_mode is true (default), response objects are converted using direct struct
 // access (ConvertJSONStruct). When false, JSON conversion is used (GoToStarlarkViaJSON).
@@ -521,7 +521,7 @@ func (m *Module) prepareChatRequest(allMsgs []*starlark.Dict, model string, para
 		Stream:           params.stream,
 	}
 
-	// Set MaxCompletionTokens if provided (for O1 series models)
+	// Set MaxCompletionTokens if provided (for o1 series models)
 	if params.maxCompletionTokens > 0 {
 		req.MaxCompletionTokens = params.maxCompletionTokens
 	}
