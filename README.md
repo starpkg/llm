@@ -95,7 +95,7 @@ Creates a message object for the chat function. Parameters:
 
 Returns a dictionary representing the message.
 
-#### `chat(text?, image?, image_file?, image_url?, messages?, model?, n?, max_tokens?, temperature?, top_p?, frequency_penalty?, presence_penalty?, stop?, response_format?, retry?, full_response?, allow_error?, stream?, stream_callback?)`
+#### `chat(text?, image?, image_file?, image_url?, messages?, model?, n?, max_tokens?, max_completion_tokens?, temperature?, top_p?, frequency_penalty?, presence_penalty?, stop?, response_format?, retry?, full_response?, allow_error?, stream?, stream_callback?)`
 
 Sends a chat completion request to the OpenAI API. Parameters:
 
@@ -106,13 +106,15 @@ Sends a chat completion request to the OpenAI API. Parameters:
 - `messages`: List of message dictionaries (from `message()` function)
 - `model`: Model to use (defaults to `openai_gpt_model` config)
 - `n`: Number of completions to generate (default: 1)
-- `max_tokens`: Maximum number of tokens to generate (default: 64)
+- `max_tokens`: Maximum number of tokens to generate (deprecated for o1 series models)
+- `max_completion_tokens`: Upper bound for generated completion tokens (for o1 series models)
 - `temperature`: Sampling temperature (default: 1.0)
 - `top_p`: Nucleus sampling parameter (default: 1.0)
 - `frequency_penalty`: Frequency penalty (default: 0.0)
 - `presence_penalty`: Presence penalty (default: 0.0)
 - `stop`: List of stop sequences
 - `response_format`: Format of the response ("text" or "json") (default: "text")
+- `reasoning_effort`: Controls reasoning effort for reasoning-capable models ("low", "medium", or "high")
 - `retry`: Number of retry attempts (default: 1)
 - `full_response`: Return the full API response (default: false)
 - `allow_error`: Return None instead of an error (default: false)
@@ -301,6 +303,33 @@ response = chat(
     max_tokens=200,
 )
 print(response)
+```
+
+### Using Reasoning Models
+
+```python
+load("llm", "chat")
+
+# Set endpoint and API key for a reasoning-capable model provider
+llm.set_openai_endpoint_url("https://reasoning-model-api-endpoint.com")
+llm.set_openai_api_key("your-api-key-here")
+
+# Call a reasoning-capable model with specific reasoning effort
+response = chat(
+    text="Solve this step by step: If 3x + 7 = 22, what is the value of x?",
+    model="reasoning-model-name",
+    reasoning_effort="high",  # Can be "low", "medium", or "high"
+    max_tokens=300,
+    full_response=True,
+)
+
+# If the model provides reasoning content, it will be available
+if hasattr(response.choices[0].message, "reasoning_content"):
+    print("Reasoning:")
+    print(response.choices[0].message.reasoning_content)
+    
+print("\nFinal answer:")
+print(response.choices[0].message.content)
 ```
 
 ## License

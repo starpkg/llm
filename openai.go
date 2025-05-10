@@ -18,6 +18,11 @@
 //   - In both streaming and blocking modes, the function returns the same format: either the complete content or full response
 //   - For streaming, the content is automatically aggregated from all chunks
 //
+// Token parameters for different models:
+//   - max_tokens: Maximum number of tokens to generate (default: 64) - works with most models
+//   - max_completion_tokens: Upper bound for generated completion tokens - for o1 series models
+//   - For o1, o3, o4 series models, use max_completion_tokens instead of max_tokens
+//
 // When legacy_mode is true (default), response objects are converted using direct struct
 // access (ConvertJSONStruct). When false, JSON conversion is used (GoToStarlarkViaJSON).
 package llm
@@ -90,15 +95,17 @@ type chatParams struct {
 	messages      *types.OneOrMany[*starlark.Dict]
 
 	// Model request params
-	userModel        *types.NullableStringOrBytes
-	numOfChoices     int
-	maxTokens        int
-	temperature      types.FloatOrInt
-	topP             types.FloatOrInt
-	frequencyPenalty types.FloatOrInt
-	presencePenalty  types.FloatOrInt
-	stopSequences    *types.OneOrMany[starlark.String]
-	responseFormat   *types.NullableStringOrBytes
+	userModel           *types.NullableStringOrBytes
+	numOfChoices        int
+	maxTokens           int
+	maxCompletionTokens int
+	temperature         types.FloatOrInt
+	topP                types.FloatOrInt
+	frequencyPenalty    types.FloatOrInt
+	presencePenalty     types.FloatOrInt
+	stopSequences       *types.OneOrMany[starlark.String]
+	responseFormat      *types.NullableStringOrBytes
+	reasoningEffort     *types.NullableStringOrBytes
 
 	// Call params
 	retryTimes   int
@@ -426,29 +433,31 @@ func (m *Module) handleBlockingRequest(ctx context.Context, cli *oai.Client, req
 func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (*chatParams, error) {
 	p := &chatParams{
 		// Default values
-		msgText:          types.NewNullableStringOrBytesNoDefault(),
-		msgImageBytes:    types.NewNullableStringOrBytesNoDefault(),
-		msgImageFile:     types.NewNullableStringOrBytesNoDefault(),
-		msgImageURL:      types.NewNullableStringOrBytesNoDefault(),
-		messages:         types.NewOneOrManyNoDefault[*starlark.Dict](),
-		userModel:        types.NewNullableStringOrBytesNoDefault(),
-		numOfChoices:     1,
-		maxTokens:        64,
-		temperature:      types.FloatOrInt(1.0),
-		topP:             types.FloatOrInt(1.0),
-		frequencyPenalty: types.FloatOrInt(0.0),
-		presencePenalty:  types.FloatOrInt(0.0),
-		stopSequences:    types.NewOneOrManyNoDefault[starlark.String](),
-		responseFormat:   types.NewNullableStringOrBytes("text"),
-		retryTimes:       1,
-		fullResponse:     false,
-		allowError:       false,
-		stream:           false,
+		msgText:             types.NewNullableStringOrBytesNoDefault(),
+		msgImageBytes:       types.NewNullableStringOrBytesNoDefault(),
+		msgImageFile:        types.NewNullableStringOrBytesNoDefault(),
+		msgImageURL:         types.NewNullableStringOrBytesNoDefault(),
+		messages:            types.NewOneOrManyNoDefault[*starlark.Dict](),
+		userModel:           types.NewNullableStringOrBytesNoDefault(),
+		numOfChoices:        1,
+		maxTokens:           0, // Default to 0 (not set)
+		maxCompletionTokens: 0, // Default to 0 (not set)
+		temperature:         types.FloatOrInt(1.0),
+		topP:                types.FloatOrInt(1.0),
+		frequencyPenalty:    types.FloatOrInt(0.0),
+		presencePenalty:     types.FloatOrInt(0.0),
+		stopSequences:       types.NewOneOrManyNoDefault[starlark.String](),
+		responseFormat:      types.NewNullableStringOrBytes("text"),
+		reasoningEffort:     types.NewNullableStringOrBytesNoDefault(),
+		retryTimes:          1,
+		fullResponse:        false,
+		allowError:          false,
+		stream:              false,
 	}
 
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"text?", p.msgText, "image?", p.msgImageBytes, "image_file?", p.msgImageFile, "image_url?", p.msgImageURL, "messages?", p.messages,
-		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty, "stop?", p.stopSequences, "response_format?", p.responseFormat,
+		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "max_completion_tokens?", &p.maxCompletionTokens, "temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty, "stop?", p.stopSequences, "response_format?", p.responseFormat, "reasoning_effort?", p.reasoningEffort,
 		"retry?", &p.retryTimes, "full_response?", &p.fullResponse, "allow_error?", &p.allowError,
 		"stream?", &p.stream, "stream_callback?", &p.streamCallback,
 	); err != nil {
@@ -512,6 +521,23 @@ func (m *Module) prepareChatRequest(allMsgs []*starlark.Dict, model string, para
 		PresencePenalty:  params.presencePenalty.GoFloat32(),
 		FrequencyPenalty: params.frequencyPenalty.GoFloat32(),
 		Stream:           params.stream,
+	}
+
+	// Set ReasoningEffort if provided
+	if !params.reasoningEffort.IsNullOrEmpty() {
+		req.ReasoningEffort = params.reasoningEffort.GoString()
+	}
+
+	// Set StreamOptions with IncludeUsage for streaming requests
+	if params.stream {
+		req.StreamOptions = &oai.StreamOptions{
+			IncludeUsage: true,
+		}
+	}
+
+	// Set MaxCompletionTokens if provided (for o1 series models)
+	if params.maxCompletionTokens > 0 {
+		req.MaxCompletionTokens = params.maxCompletionTokens
 	}
 
 	// Set response format
