@@ -5,7 +5,7 @@ go 1.18
 require (
 	github.com/1set/starlet v0.1.3
 	github.com/sashabaranov/go-openai v1.39.1
-	github.com/starpkg/base v0.0.4
+	github.com/starpkg/base v0.0.5
 	go.starlark.net v0.0.0-20240123142251-f86470692795
 )
 
@@ -21,5 +21,3 @@ require (
 	go.uber.org/zap v1.24.0 // indirect
 	golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8 // indirect
 )
-
-replace github.com/starpkg/base => ../base
