@@ -123,22 +123,42 @@ Sends a chat completion request to the OpenAI API. Parameters:
 
 Returns the generated text or a list of generated texts if `n > 1`. In streaming mode, the return value is constructed by combining all chunks. When `full_response=True` in streaming mode, the response includes token usage information accumulated from all stream chunks.
 
-#### `draw(prompt, model?, n?, quality?, size?, style?, response_format?, retry?, full_response?, allow_error?)`
+#### `draw(prompt, model?, n?, quality?, size?, style?, response_format?, background?, moderation?, output_format?, output_compression?, retry?, full_response?, allow_error?)`
 
-Generates an image using DALL-E. Parameters:
+Generates an image using DALL-E or GPT Image 1. Parameters:
 
 - `prompt`: Text prompt for the image generation (required)
+  - Max length: 32000 characters for gpt-image-1, 4000 for dall-e-3, 1000 for dall-e-2
 - `model`: Model to use (defaults to `openai_dalle_model` config)
+  - Supported models: "dall-e-2", "dall-e-3", "gpt-image-1"
 - `n`: Number of images to generate (default: 1)
-- `quality`: Image quality ("standard", "hd") (default: "standard")
-- `size`: Image size ("256x256", "512x512", "1024x1024", "1792x1024", "1024x1792") (default: "1024x1024")
-- `style`: Image style ("vivid", "natural") (default: "vivid")
-- `response_format`: Format of the response ("url" or "b64_json") (default: "url")
+  - dall-e-2/gpt-image-1: 1-10 images, dall-e-3: only 1 image supported
+- `quality`: Image quality (default: "auto" for gpt-image-1, "standard" for DALL-E)
+  - GPT Image 1: "auto", "high", "medium", "low"
+  - DALL-E 3: "standard", "hd"
+  - DALL-E 2: "standard" only
+- `size`: Image size (default: "auto" for gpt-image-1, "1024x1024" for DALL-E)
+  - GPT Image 1: "auto", "1024x1024", "1536x1024" (landscape), "1024x1536" (portrait)
+  - DALL-E 3: "1024x1024", "1792x1024", "1024x1792"
+  - DALL-E 2: "256x256", "512x512", "1024x1024"
+- `style`: Image style (DALL-E 3 only, default: "vivid")
+  - DALL-E 3: "vivid", "natural"
+- `response_format`: Response format (DALL-E only, default: "url")
+  - DALL-E 2/3: "url", "b64_json"
+  - GPT Image 1: Always returns base64-encoded images (parameter ignored)
+- `background`: Background type (GPT Image 1 only, default: "auto")
+  - GPT Image 1: "auto", "transparent", "opaque"
+- `moderation`: Content moderation level (GPT Image 1 only, default: "auto")
+  - GPT Image 1: "auto", "low"
+- `output_format`: Output image format (GPT Image 1 only, default: "png")
+  - GPT Image 1: "png", "jpeg", "webp"
+- `output_compression`: Compression level 0-100 (GPT Image 1 only, default: 100)
+  - GPT Image 1: Only supported with "jpeg" or "webp" output formats
 - `retry`: Number of retry attempts (default: 1)
 - `full_response`: Return the full API response (default: false)
 - `allow_error`: Return None instead of an error (default: false)
 
-Returns the image URL or a list of image URLs if `n > 1`.
+Returns the image URL (DALL-E) or base64-encoded image data (GPT Image 1), or a list if `n > 1`.
 
 ## Examples
 
@@ -168,13 +188,63 @@ print(json_resp)
 ```python
 load("llm", "draw")
 
-# Generate an image
-image_url = draw(
+# Generate with DALL-E 3 (existing functionality)
+dalle_image = draw(
     prompt="A futuristic city with flying cars and tall skyscrapers",
+    model="dall-e-3",
     quality="hd",
     size="1024x1024",
+    style="vivid"
 )
-print(image_url)
+print("DALL-E 3 image URL:", dalle_image)
+
+# Generate with GPT Image 1 (new functionality)
+gpt_image = draw(
+    prompt="A realistic portrait of a robot scientist in a laboratory",
+    model="gpt-image-1",
+    quality="high",
+    size="1024x1536",  # Portrait orientation
+    background="transparent",
+    output_format="png"
+)
+print("GPT Image 1 base64 data length:", len(gpt_image))
+
+# Using content moderation with GPT Image 1
+moderated_image = draw(
+    prompt="A family-friendly cartoon character playing in a park",
+    model="gpt-image-1",
+    quality="medium",
+    moderation="low",
+    output_format="webp",
+    output_compression=85
+)
+print("Moderated image data:", moderated_image[:100] + "...")
+
+# Generate multiple images with GPT Image 1
+multiple_images = draw(
+    prompt="Abstract geometric patterns in bright colors",
+    model="gpt-image-1",
+    n=3,
+    quality="medium",
+    size="1024x1024",
+    output_format="jpeg",
+    output_compression=90
+)
+print(f"Generated {len(multiple_images)} images")
+
+# Get full response with token usage information
+full_resp = draw(
+    prompt="An artistic illustration of AI concepts and neural networks",
+    model="gpt-image-1",
+    quality="high",
+    full_response=True
+)
+print("Image data:", full_resp.data[0].b64_json[:100] + "...")
+if hasattr(full_resp, "usage"):
+    usage = full_resp.usage
+    print(f"Total tokens: {usage.total_tokens}")
+    print(f"Input tokens: {usage.input_tokens}")
+    print(f"Output tokens: {usage.output_tokens}")
 ```
 
 ### Streaming Mode
