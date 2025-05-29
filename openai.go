@@ -456,9 +456,13 @@ func (m *Module) genDrawFunc() starlark.Callable {
 		// For DALL-E, check the response format
 		extractImage := func(di oai.ImageResponseDataInner) (starlark.Value, error) {
 			if isGPTImage1 {
-				// GPT Image 1 always returns base64 data
+				// GPT Image 1 always returns base64 data, decode it to bytes
 				if di.B64JSON != "" {
-					return starlark.String(di.B64JSON), nil
+					ib, err := base64.StdEncoding.DecodeString(di.B64JSON)
+					if err != nil {
+						return none, fmt.Errorf("failed to decode base64 image data: %w", err)
+					}
+					return starlark.Bytes(string(ib)), nil
 				}
 				return none, errors.New("no image data returned from gpt-image-1")
 			}
