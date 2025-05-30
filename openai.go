@@ -106,6 +106,7 @@ type chatParams struct {
 	stopSequences       *types.OneOrMany[starlark.String]
 	responseFormat      *types.NullableStringOrBytes
 	reasoningEffort     *types.NullableStringOrBytes
+	kwargs              *starlark.Dict
 
 	// Call params
 	retryTimes   int
@@ -595,6 +596,7 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 		stopSequences:       types.NewOneOrManyNoDefault[starlark.String](),
 		responseFormat:      types.NewNullableStringOrBytes("text"),
 		reasoningEffort:     types.NewNullableStringOrBytesNoDefault(),
+		kwargs:              nil, // Additional kwargs (optional)
 		retryTimes:          1,
 		fullResponse:        false,
 		allowError:          false,
@@ -606,6 +608,7 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "max_completion_tokens?", &p.maxCompletionTokens, "temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty, "stop?", p.stopSequences, "response_format?", p.responseFormat, "reasoning_effort?", p.reasoningEffort,
 		"retry?", &p.retryTimes, "full_response?", &p.fullResponse, "allow_error?", &p.allowError,
 		"stream?", &p.stream, "stream_callback?", &p.streamCallback,
+		"kwargs?", &p.kwargs,
 	); err != nil {
 		return nil, err
 	}
@@ -639,6 +642,41 @@ func (m *Module) prepareMessages(params *chatParams) []*starlark.Dict {
 	}
 
 	return allMsgs
+}
+
+// convertStarlarkDictToGoMap converts a Starlark dict to Go map[string]any using dataconv.
+// It handles both map[string]interface{} and map[interface{}]interface{} cases returned by dataconv.Unmarshal.
+func (m *Module) convertStarlarkDictToGoMap(dict *starlark.Dict) (map[string]any, error) {
+	if dict == nil {
+		return nil, nil
+	}
+
+	// Use dataconv.Unmarshal to convert Starlark dict to Go interface{}
+	gv, err := dataconv.Unmarshal(dict)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal kwargs: %w", err)
+	}
+
+	// Handle different map types returned by dataconv.Unmarshal
+	switch v := gv.(type) {
+	case map[string]interface{}:
+		// Direct case - all keys are strings
+		return v, nil
+	case map[interface{}]interface{}:
+		// Need to convert keys to strings
+		result := make(map[string]interface{})
+		for k, val := range v {
+			key, ok := k.(string)
+			if !ok {
+				// Convert non-string keys to string representation
+				key = fmt.Sprintf("%v", k)
+			}
+			result[key] = val
+		}
+		return result, nil
+	default:
+		return nil, fmt.Errorf("kwargs must be a dict, got %T", gv)
+	}
 }
 
 // prepareChatRequest builds a chat completion request from messages and parameters
@@ -697,6 +735,15 @@ func (m *Module) prepareChatRequest(allMsgs []*starlark.Dict, model string, para
 		}
 	} else {
 		return oai.ChatCompletionRequest{}, fmt.Errorf("unsupported response format: %s", rf)
+	}
+
+	// Convert kwargs if provided
+	if params.kwargs != nil {
+		chatTemplateKwargs, err := m.convertStarlarkDictToGoMap(params.kwargs)
+		if err != nil {
+			return oai.ChatCompletionRequest{}, err
+		}
+		req.ChatTemplateKwargs = chatTemplateKwargs
 	}
 
 	return req, nil
