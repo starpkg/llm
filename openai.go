@@ -18,6 +18,11 @@
 //   - In both streaming and blocking modes, the function returns the same format: either the complete content or full response
 //   - For streaming, the content is automatically aggregated from all chunks
 //
+// Custom parameters support:
+//   - The kwargs parameter allows passing custom or non-standard parameters to the API
+//   - Useful for provider-specific features, experimental parameters, or custom deployments
+//   - Any dictionary passed as kwargs will be included in the ChatTemplateKwargs field of the API request
+//
 // Token parameters for different models:
 //   - max_tokens: Maximum number of tokens to generate (default: 64) - works with most models
 //   - max_completion_tokens: Upper bound for generated completion tokens - for o1 series models
@@ -605,7 +610,9 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"text?", p.msgText, "image?", p.msgImageBytes, "image_file?", p.msgImageFile, "image_url?", p.msgImageURL, "messages?", p.messages,
-		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "max_completion_tokens?", &p.maxCompletionTokens, "temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty, "stop?", p.stopSequences, "response_format?", p.responseFormat, "reasoning_effort?", p.reasoningEffort,
+		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "max_completion_tokens?", &p.maxCompletionTokens,
+		"temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty,
+		"stop?", p.stopSequences, "response_format?", p.responseFormat, "reasoning_effort?", p.reasoningEffort,
 		"retry?", &p.retryTimes, "full_response?", &p.fullResponse, "allow_error?", &p.allowError,
 		"stream?", &p.stream, "stream_callback?", &p.streamCallback,
 		"kwargs?", &p.kwargs,

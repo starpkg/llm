@@ -95,7 +95,7 @@ Creates a message object for the chat function. Parameters:
 
 Returns a dictionary representing the message.
 
-#### `chat(text?, image?, image_file?, image_url?, messages?, model?, n?, max_tokens?, max_completion_tokens?, temperature?, top_p?, frequency_penalty?, presence_penalty?, stop?, response_format?, retry?, full_response?, allow_error?, stream?, stream_callback?)`
+#### `chat(text?, image?, image_file?, image_url?, messages?, model?, n?, max_tokens?, max_completion_tokens?, temperature?, top_p?, frequency_penalty?, presence_penalty?, stop?, response_format?, reasoning_effort?, retry?, full_response?, allow_error?, stream?, stream_callback?, kwargs?)`
 
 Sends a chat completion request to the OpenAI API. Parameters:
 
@@ -115,6 +115,7 @@ Sends a chat completion request to the OpenAI API. Parameters:
 - `stop`: List of stop sequences
 - `response_format`: Format of the response ("text" or "json") (default: "text")
 - `reasoning_effort`: Controls reasoning effort for reasoning-capable models ("low", "medium", or "high")
+- `kwargs`: Dictionary of additional parameters to pass to the API (for custom or non-standard parameters)
 - `retry`: Number of retry attempts (default: 1)
 - `full_response`: Return the full API response (default: false)
 - `allow_error`: Return None instead of an error (default: false)
@@ -400,6 +401,60 @@ if hasattr(response.choices[0].message, "reasoning_content"):
     
 print("\nFinal answer:")
 print(response.choices[0].message.content)
+```
+
+### Using Custom Parameters with kwargs
+
+```python
+load("llm", "chat")
+
+# Example 1: Using kwargs for custom or experimental parameters
+# Some API providers or custom deployments may support additional parameters
+response = chat(
+    text="Generate a creative story about space exploration.",
+    max_tokens=200,
+    kwargs={
+        "custom_parameter": "value",
+        "experimental_feature": True,
+        "custom_config": {
+            "setting_a": "option1",
+            "setting_b": 42
+        }
+    }
+)
+print(response)
+
+# Example 2: Using kwargs for provider-specific parameters
+# Different OpenAI-compatible providers may have unique parameters
+response = chat(
+    text="What are the benefits of renewable energy?",
+    max_tokens=150,
+    kwargs={
+        "provider_specific_param": "custom_value",
+        "optimization_level": "high",
+        "cache_enabled": True
+    }
+)
+print(response)
+
+# Example 3: Combining standard parameters with custom kwargs
+response = chat(
+    text="Explain machine learning in simple terms.",
+    model="gpt-4",
+    temperature=0.7,
+    max_tokens=200,
+    kwargs={
+        "safety_level": "strict",
+        "response_style": "educational",
+        "custom_instruction": "Use analogies when possible"
+    },
+    full_response=True
+)
+
+# Access both standard response and any custom fields
+print("Content:", response.choices[0].message.content)
+if hasattr(response, 'custom_fields'):
+    print("Custom response fields:", response.custom_fields)
 ```
 
 ## License
