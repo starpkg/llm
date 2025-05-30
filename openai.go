@@ -111,7 +111,7 @@ type chatParams struct {
 	stopSequences       *types.OneOrMany[starlark.String]
 	responseFormat      *types.NullableStringOrBytes
 	reasoningEffort     *types.NullableStringOrBytes
-	kwargs              *starlark.Dict
+	chatKwargs          *starlark.Dict
 
 	// Call params
 	retryTimes   int
@@ -601,7 +601,7 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 		stopSequences:       types.NewOneOrManyNoDefault[starlark.String](),
 		responseFormat:      types.NewNullableStringOrBytes("text"),
 		reasoningEffort:     types.NewNullableStringOrBytesNoDefault(),
-		kwargs:              nil, // Additional kwargs (optional)
+		chatKwargs:          nil, // Additional kwargs (optional)
 		retryTimes:          1,
 		fullResponse:        false,
 		allowError:          false,
@@ -615,7 +615,7 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 		"stop?", p.stopSequences, "response_format?", p.responseFormat, "reasoning_effort?", p.reasoningEffort,
 		"retry?", &p.retryTimes, "full_response?", &p.fullResponse, "allow_error?", &p.allowError,
 		"stream?", &p.stream, "stream_callback?", &p.streamCallback,
-		"kwargs?", &p.kwargs,
+		"kwargs?", &p.chatKwargs,
 	); err != nil {
 		return nil, err
 	}
@@ -745,8 +745,8 @@ func (m *Module) prepareChatRequest(allMsgs []*starlark.Dict, model string, para
 	}
 
 	// Convert kwargs if provided
-	if params.kwargs != nil {
-		chatTemplateKwargs, err := m.convertStarlarkDictToGoMap(params.kwargs)
+	if params.chatKwargs != nil {
+		chatTemplateKwargs, err := m.convertStarlarkDictToGoMap(params.chatKwargs)
 		if err != nil {
 			return oai.ChatCompletionRequest{}, err
 		}
