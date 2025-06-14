@@ -20,6 +20,11 @@ go get github.com/starpkg/llm
 
 ## Usage in Go
 
+The module provides two main constructors:
+
+- `NewModule()`: Creates a module with empty configurations
+- `NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleModel, apiVersion string)`: Creates a module with preset configuration values
+
 ```go
 package main
 
@@ -34,7 +39,7 @@ import (
 func main() {
 	// Create a new LLM module with API key
 	apiKey := os.Getenv("OPENAI_API_KEY")
-	mod := llm.NewModuleWithConfig("openai", "", apiKey, "gpt-4o", "dall-e-3")
+	mod := llm.NewModuleWithConfig("openai", "", apiKey, "gpt-4o", "dall-e-3", "")
 
 	// Create a Starlet interpreter with the module
 	interpreter := starlet.New(
@@ -80,6 +85,8 @@ The module has the following configuration options:
 - `openai_api_key`: The API key (required)
 - `openai_gpt_model`: The default GPT model to use
 - `openai_dalle_model`: The default DALL-E model to use
+- `api_version`: The API version (for Azure, default: "2024-02-01")
+- `legacy_mode`: Use legacy mode for data conversion (default: true)
 
 ### Functions
 
