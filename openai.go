@@ -18,6 +18,11 @@
 //   - In both streaming and blocking modes, the function returns the same format: either the complete content or full response
 //   - For streaming, the content is automatically aggregated from all chunks
 //
+// Custom parameters support:
+//   - The kwargs parameter allows passing custom or non-standard parameters to the API
+//   - Useful for provider-specific features, experimental parameters, or custom deployments
+//   - Any dictionary passed as kwargs will be included in the ChatTemplateKwargs field of the API request
+//
 // Token parameters for different models:
 //   - max_tokens: Maximum number of tokens to generate (default: 64) - works with most models
 //   - max_completion_tokens: Upper bound for generated completion tokens - for o1 series models
@@ -106,6 +111,7 @@ type chatParams struct {
 	stopSequences       *types.OneOrMany[starlark.String]
 	responseFormat      *types.NullableStringOrBytes
 	reasoningEffort     *types.NullableStringOrBytes
+	chatKwargs          *starlark.Dict
 
 	// Call params
 	retryTimes   int
@@ -246,10 +252,15 @@ func (m *Module) genDrawFunc() starlark.Callable {
 			// model request
 			userModel      = types.NewNullableStringOrBytesNoDefault()
 			numOfChoices   = 1
-			quality        = types.NewNullableStringOrBytes("standard")
-			size           = types.NewNullableStringOrBytes("1024x1024")
+			quality        = types.NewNullableStringOrBytesNoDefault()
+			size           = types.NewNullableStringOrBytesNoDefault()
 			style          = types.NewNullableStringOrBytes("vivid")
 			responseFormat = types.NewNullableStringOrBytes("url")
+			// GPT Image 1 specific parameters
+			background        = types.NewNullableStringOrBytesNoDefault()
+			moderation        = types.NewNullableStringOrBytesNoDefault()
+			outputFormat      = types.NewNullableStringOrBytesNoDefault()
+			outputCompression = 0
 			// call
 			retryTimes   = 1
 			fullResponse = false
@@ -257,6 +268,7 @@ func (m *Module) genDrawFunc() starlark.Callable {
 		)
 		if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 			"prompt", prompt, "model?", userModel, "n?", &numOfChoices, "quality?", quality, "size?", size, "style?", style, "response_format?", responseFormat,
+			"background?", background, "moderation?", moderation, "output_format?", outputFormat, "output_compression?", &outputCompression,
 			"retry?", &retryTimes, "full_response?", &fullResponse, "allow_error?", &allowError,
 		); err != nil {
 			return none, err
@@ -273,15 +285,140 @@ func (m *Module) genDrawFunc() starlark.Callable {
 			return none, errors.New("dalle model is not set")
 		}
 
+		// validate model-specific parameters and set defaults
+		isGPTImage1 := strings.ToLower(model) == "gpt-image-1"
+		isDallE3 := strings.ToLower(model) == "dall-e-3"
+		isDallE2 := strings.ToLower(model) == "dall-e-2"
+
+		// Set default values based on model
+		if isGPTImage1 {
+			// GPT Image 1 defaults
+			if quality.IsNullOrEmpty() {
+				quality = types.NewNullableStringOrBytes("auto")
+			}
+			if size.IsNullOrEmpty() {
+				size = types.NewNullableStringOrBytes("auto")
+			}
+			if background.IsNullOrEmpty() {
+				background = types.NewNullableStringOrBytes("auto")
+			}
+			if moderation.IsNullOrEmpty() {
+				moderation = types.NewNullableStringOrBytes("auto")
+			}
+			if outputFormat.IsNullOrEmpty() {
+				outputFormat = types.NewNullableStringOrBytes("png")
+			}
+			if outputCompression == 0 {
+				outputCompression = 100
+			}
+		} else {
+			// DALL-E defaults
+			if quality.IsNullOrEmpty() {
+				quality = types.NewNullableStringOrBytes("standard")
+			}
+			if size.IsNullOrEmpty() {
+				size = types.NewNullableStringOrBytes("1024x1024")
+			}
+		}
+
+		// Validate DALL-E 3 specific constraints
+		if isDallE3 && numOfChoices > 1 {
+			return none, errors.New("dall-e-3 only supports n=1")
+		}
+
+		// Validate GPT Image 1 specific parameters
+		if isGPTImage1 {
+			// Validate background
+			if !background.IsNullOrEmpty() {
+				bg := strings.ToLower(background.GoString())
+				if bg != "auto" && bg != "transparent" && bg != "opaque" {
+					return none, errors.New("background must be 'auto', 'transparent', or 'opaque' for gpt-image-1")
+				}
+			}
+
+			// Validate moderation
+			if !moderation.IsNullOrEmpty() {
+				mod := strings.ToLower(moderation.GoString())
+				if mod != "auto" && mod != "low" {
+					return none, errors.New("moderation must be 'auto' or 'low' for gpt-image-1")
+				}
+			}
+
+			// Validate output format
+			if !outputFormat.IsNullOrEmpty() {
+				of := strings.ToLower(outputFormat.GoString())
+				if of != "png" && of != "jpeg" && of != "webp" {
+					return none, errors.New("output_format must be 'png', 'jpeg', or 'webp' for gpt-image-1")
+				}
+			}
+
+			// Validate output compression
+			if outputCompression < 0 || outputCompression > 100 {
+				return none, errors.New("output_compression must be between 0 and 100 for gpt-image-1")
+			}
+
+			// Validate quality options for GPT Image 1
+			if !quality.IsNullOrEmpty() {
+				qual := strings.ToLower(quality.GoString())
+				if qual != "auto" && qual != "high" && qual != "medium" && qual != "low" {
+					return none, errors.New("quality must be 'auto', 'high', 'medium', or 'low' for gpt-image-1")
+				}
+			}
+
+			// Validate size options for GPT Image 1
+			if !size.IsNullOrEmpty() {
+				sz := strings.ToLower(size.GoString())
+				if sz != "auto" && sz != "1024x1024" && sz != "1536x1024" && sz != "1024x1536" {
+					return none, errors.New("size must be 'auto', '1024x1024', '1536x1024', or '1024x1536' for gpt-image-1")
+				}
+			}
+		} else {
+			// Warn about GPT Image 1 specific parameters being used with DALL-E
+			if !background.IsNullOrEmpty() || !moderation.IsNullOrEmpty() || !outputFormat.IsNullOrEmpty() || outputCompression != 100 {
+				// For DALL-E models, ignore these parameters silently to maintain compatibility
+			}
+
+			// Validate DALL-E quality options
+			if !quality.IsNullOrEmpty() {
+				qual := strings.ToLower(quality.GoString())
+				if isDallE3 && qual != "standard" && qual != "hd" {
+					return none, errors.New("quality must be 'standard' or 'hd' for dall-e-3")
+				}
+				if isDallE2 && qual != "standard" {
+					return none, errors.New("quality must be 'standard' for dall-e-2")
+				}
+			}
+		}
+
 		// build request
 		req := oai.ImageRequest{
-			Prompt:         prompt.GoString(),
-			Model:          model,
-			N:              numOfChoices,
-			Quality:        quality.GoString(),
-			Size:           size.GoString(),
-			Style:          style.GoString(),
-			ResponseFormat: responseFormat.GoString(),
+			Prompt:  prompt.GoString(),
+			Model:   model,
+			N:       numOfChoices,
+			Quality: quality.GoString(),
+			Size:    size.GoString(),
+		}
+
+		// Add DALL-E 3 specific parameters
+		if isDallE3 {
+			req.Style = style.GoString()
+			req.ResponseFormat = responseFormat.GoString()
+		}
+
+		// Add GPT Image 1 specific parameters
+		if isGPTImage1 {
+			if !background.IsNullOrEmpty() {
+				req.Background = background.GoString()
+			}
+			if !moderation.IsNullOrEmpty() {
+				req.Moderation = moderation.GoString()
+			}
+			if !outputFormat.IsNullOrEmpty() {
+				req.OutputFormat = outputFormat.GoString()
+			}
+			if outputCompression > 0 && outputCompression != 100 {
+				req.OutputCompression = outputCompression
+			}
 		}
 
 		// get client
@@ -321,9 +458,23 @@ func (m *Module) genDrawFunc() starlark.Callable {
 			return m.convertGoToStarlark(&resp)
 		}
 
-		// if numOfChoices is 1, return the content string, otherwise return a list of contents
-		isURL := strings.ToLower(responseFormat.GoString()) == "url"
+		// For GPT Image 1, always return base64 data since it doesn't support URL format
+		// For DALL-E, check the response format
 		extractImage := func(di oai.ImageResponseDataInner) (starlark.Value, error) {
+			if isGPTImage1 {
+				// GPT Image 1 always returns base64 data, decode it to bytes
+				if di.B64JSON != "" {
+					ib, err := base64.StdEncoding.DecodeString(di.B64JSON)
+					if err != nil {
+						return none, fmt.Errorf("failed to decode base64 image data: %w", err)
+					}
+					return starlark.Bytes(string(ib)), nil
+				}
+				return none, errors.New("no image data returned from gpt-image-1")
+			}
+
+			// DALL-E logic (existing)
+			isURL := strings.ToLower(responseFormat.GoString()) == "url"
 			if isURL {
 				return starlark.String(di.URL), nil
 			}
@@ -342,6 +493,7 @@ func (m *Module) genDrawFunc() starlark.Callable {
 			}
 			return starlark.Bytes(bf.String()), nil
 		}
+
 		if numOfChoices == 1 {
 			return extractImage(resp.Data[0])
 		}
@@ -449,6 +601,7 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 		stopSequences:       types.NewOneOrManyNoDefault[starlark.String](),
 		responseFormat:      types.NewNullableStringOrBytes("text"),
 		reasoningEffort:     types.NewNullableStringOrBytesNoDefault(),
+		chatKwargs:          nil, // Additional kwargs (optional)
 		retryTimes:          1,
 		fullResponse:        false,
 		allowError:          false,
@@ -457,9 +610,12 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"text?", p.msgText, "image?", p.msgImageBytes, "image_file?", p.msgImageFile, "image_url?", p.msgImageURL, "messages?", p.messages,
-		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "max_completion_tokens?", &p.maxCompletionTokens, "temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty, "stop?", p.stopSequences, "response_format?", p.responseFormat, "reasoning_effort?", p.reasoningEffort,
+		"model?", p.userModel, "n?", &p.numOfChoices, "max_tokens?", &p.maxTokens, "max_completion_tokens?", &p.maxCompletionTokens,
+		"temperature?", &p.temperature, "top_p?", &p.topP, "frequency_penalty?", &p.frequencyPenalty, "presence_penalty?", &p.presencePenalty,
+		"stop?", p.stopSequences, "response_format?", p.responseFormat, "reasoning_effort?", p.reasoningEffort,
 		"retry?", &p.retryTimes, "full_response?", &p.fullResponse, "allow_error?", &p.allowError,
 		"stream?", &p.stream, "stream_callback?", &p.streamCallback,
+		"kwargs?", &p.chatKwargs,
 	); err != nil {
 		return nil, err
 	}
@@ -493,6 +649,41 @@ func (m *Module) prepareMessages(params *chatParams) []*starlark.Dict {
 	}
 
 	return allMsgs
+}
+
+// convertStarlarkDictToGoMap converts a Starlark dict to Go map[string]any using dataconv.
+// It handles both map[string]interface{} and map[interface{}]interface{} cases returned by dataconv.Unmarshal.
+func (m *Module) convertStarlarkDictToGoMap(dict *starlark.Dict) (map[string]any, error) {
+	if dict == nil {
+		return nil, nil
+	}
+
+	// Use dataconv.Unmarshal to convert Starlark dict to Go interface{}
+	gv, err := dataconv.Unmarshal(dict)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal kwargs: %w", err)
+	}
+
+	// Handle different map types returned by dataconv.Unmarshal
+	switch v := gv.(type) {
+	case map[string]interface{}:
+		// Direct case - all keys are strings
+		return v, nil
+	case map[interface{}]interface{}:
+		// Need to convert keys to strings
+		result := make(map[string]interface{})
+		for k, val := range v {
+			key, ok := k.(string)
+			if !ok {
+				// Convert non-string keys to string representation
+				key = fmt.Sprintf("%v", k)
+			}
+			result[key] = val
+		}
+		return result, nil
+	default:
+		return nil, fmt.Errorf("kwargs must be a dict, got %T", gv)
+	}
 }
 
 // prepareChatRequest builds a chat completion request from messages and parameters
@@ -551,6 +742,15 @@ func (m *Module) prepareChatRequest(allMsgs []*starlark.Dict, model string, para
 		}
 	} else {
 		return oai.ChatCompletionRequest{}, fmt.Errorf("unsupported response format: %s", rf)
+	}
+
+	// Convert kwargs if provided
+	if params.chatKwargs != nil {
+		chatTemplateKwargs, err := m.convertStarlarkDictToGoMap(params.chatKwargs)
+		if err != nil {
+			return oai.ChatCompletionRequest{}, err
+		}
+		req.ChatTemplateKwargs = chatTemplateKwargs
 	}
 
 	return req, nil
