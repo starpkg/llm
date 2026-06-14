@@ -1,5 +1,8 @@
 # 🤖 `llm` - Starlark Module for AI and LLM Services
 
+[![godoc](https://pkg.go.dev/badge/github.com/starpkg/llm.svg)](https://pkg.go.dev/github.com/starpkg/llm)
+[![license](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
 A powerful Starlark module for interacting with OpenAI and OpenAI-compatible API services. Easily generate text using chat completions and create images with DALL-E from your Starlark scripts.
 
 ## Features
