@@ -6,7 +6,7 @@
 //   - openai_api_key: API key for authentication
 //   - openai_gpt_model: Default GPT model name
 //   - openai_dalle_model: Default DALL-E model name
-//   - api_version: API version (for Azure)
+//   - api_version: API version (used by Azure and Anthropic)
 //   - legacy_mode: Use legacy mode for data conversion (default: true)
 //
 // The chat function supports both blocking and streaming modes:
@@ -24,7 +24,7 @@
 //   - Any dictionary passed as kwargs will be included in the ChatTemplateKwargs field of the API request
 //
 // Token parameters for different models:
-//   - max_tokens: Maximum number of tokens to generate (default: 64) - works with most models
+//   - max_tokens: Maximum number of tokens to generate; 0 (the default) leaves it unset so the API applies its own default - works with most models
 //   - max_completion_tokens: Upper bound for generated completion tokens - for o1 series models
 //   - For o1, o3, o4 series models, use max_completion_tokens instead of max_tokens
 //
@@ -195,7 +195,8 @@ func newModuleWithOptions(providerOpt, endpointOpt, apiKeyOpt, gptModelOpt, dall
 	}
 }
 
-// LoadModule returns the Starlark module loader with the email-specific functions.
+// LoadModule returns the Starlark module loader exposing the llm builtins
+// (message, chat, draw) plus the generated config setters/getters.
 func (m *Module) LoadModule() starlet.ModuleLoader {
 	additionalFuncs := starlark.StringDict{
 		"message": starlark.NewBuiltin("message", newMessageStruct),
