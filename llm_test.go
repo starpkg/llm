@@ -819,6 +819,22 @@ chat(text="hi", response_format="json", max_completion_tokens=42, reasoning_effo
 	if gotReq.MaxCompletionTokens != 42 {
 		t.Errorf("max_completion_tokens = %d, want 42", gotReq.MaxCompletionTokens)
 	}
+	// The float tuning params must reach the request as the float32 the script
+	// supplied (asserting the value, not just that the line ran).
+	for _, fc := range []struct {
+		name string
+		got  float32
+		want float32
+	}{
+		{"temperature", gotReq.Temperature, 0.2},
+		{"top_p", gotReq.TopP, 0.9},
+		{"frequency_penalty", gotReq.FrequencyPenalty, 0.5},
+		{"presence_penalty", gotReq.PresencePenalty, 0.25},
+	} {
+		if fc.got != float32(fc.want) {
+			t.Errorf("%s = %v, want %v", fc.name, fc.got, fc.want)
+		}
+	}
 
 	// legacy_mode=false: full_response goes through GoToStarlarkViaJSON. The
 	// converted value must still expose the id/choices fields (JSON-shaped).
