@@ -225,7 +225,7 @@ func TestKwargsConversion(t *testing.T) {
 //
 // Sections:
 //   - newTestServerModule        : loopback test-server helper
-//   - runScript helpers          : script execution helpers
+//   - runModuleScript / assert   : script runner + injected assert/fail globals
 //   - TestModuleConstruction     : NewModule / NewModuleWithConfig / defaulting
 //   - TestGetClientSelection     : provider routing + error branches
 //   - TestModelAndDictHelpers    : getModel / getStringFromDict
@@ -233,11 +233,13 @@ func TestKwargsConversion(t *testing.T) {
 //   - TestMessageBuiltin         : message() data builder + arg errors
 //   - TestChatArgErrors          : chat() validation before any network call
 //   - TestDrawArgErrors          : draw() validation before any network call
+//   - TestMultimodalMessages     : message -> MultiContent (bytes/url/file)
 //   - TestChatRequestRoundTrip   : blocking chat happy path + n>1 + full_response
+//   - TestChatRequestShaping     : optional-param request shaping + modern mode
 //   - TestChatRetryAndAllowError : retry short-circuit + allow_error swallowing
 //   - TestStreamingChat          : streaming aggregation + callback
 //   - TestDrawRoundTrip          : draw url/b64/gpt-image-1 paths
-//   - TestHardeningNoPanic       : adversarial n / empty data / cancellation
+//   - TestHardeningNoPanic       : adversarial n + empty image data + clamp unit
 // ---------------------------------------------------------------------------
 
 // newTestServerModule returns a Module whose client points at the given
