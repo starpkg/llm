@@ -2,6 +2,8 @@
 
 [![godoc](https://pkg.go.dev/badge/github.com/starpkg/llm.svg)](https://pkg.go.dev/github.com/starpkg/llm)
 [![license](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![codecov](https://codecov.io/gh/starpkg/llm/graph/badge.svg)](https://codecov.io/gh/starpkg/llm)
+![binary footprint](https://img.shields.io/badge/binary_footprint-%2B0.5_MB-blue)
 
 A Starlark module for interacting with OpenAI and OpenAI-compatible API services. Generate text with chat completions and create images with DALL-E / GPT Image 1, directly from your Starlark scripts.
 
