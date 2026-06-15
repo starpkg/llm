@@ -83,6 +83,25 @@ const (
 	defaultAPIVersion = "2024-02-01" // Azure's default API version
 )
 
+// maxStreamChoices bounds the number of per-choice accumulators a streaming
+// chat request pre-allocates from the script-supplied n. The provider API caps
+// n far below this, so the bound never affects a legitimate request; it only
+// stops a hostile or buggy n from panicking makeslice (negative) or exhausting
+// host memory (absurdly large) before any stream chunk is received.
+const maxStreamChoices = 256
+
+// clampStreamChoices returns a non-negative, bounded count safe to pre-allocate
+// for a streaming response, given the script-supplied number of choices.
+func clampStreamChoices(n int) int {
+	if n < 0 {
+		return 0
+	}
+	if n > maxStreamChoices {
+		return maxStreamChoices
+	}
+	return n
+}
+
 // Module wraps the ConfigurableModule with specific functionality for calling OpenAI models.
 type Module struct {
 	cfgMod *base.ConfigurableModule
@@ -495,6 +514,13 @@ func (m *Module) genDrawFunc() starlark.Callable {
 			return starlark.Bytes(bf.String()), nil
 		}
 
+		// A successful response with no image data must not panic on indexing;
+		// a compatible gateway or a filtered/empty result can return 200 with an
+		// empty Data slice. Surface it as a clean error instead of crashing.
+		if len(resp.Data) == 0 {
+			return none, errors.New("no image data returned")
+		}
+
 		if numOfChoices == 1 {
 			return extractImage(resp.Data[0])
 		}
@@ -798,14 +824,20 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 	}
 	defer stream.Close()
 
-	// Initialize the full response
+	// Initialize the full response. The number of choices comes from the
+	// script-supplied n parameter, so clamp the pre-allocation to a safe,
+	// non-negative bound before any chunk arrives: a negative n would panic
+	// makeslice and an absurd n would exhaust host memory. Any choice index the
+	// stream reports beyond this bound is dropped by the i < len() guards below,
+	// so a legitimate n (the API caps n well under maxStreamChoices) is unaffected.
+	numChoices := clampStreamChoices(params.numOfChoices)
 	fullResp := &oai.ChatCompletionResponse{
 		Model:   model,
-		Choices: make([]oai.ChatCompletionChoice, params.numOfChoices),
+		Choices: make([]oai.ChatCompletionChoice, numChoices),
 	}
 
 	// Initialize content builders for each choice
-	contentBuilders := make([]strings.Builder, params.numOfChoices)
+	contentBuilders := make([]strings.Builder, numChoices)
 
 	// Track metadata from stream responses
 	var lastStreamResp oai.ChatCompletionStreamResponse
