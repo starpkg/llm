@@ -6,7 +6,7 @@
 //   - openai_api_key: API key for authentication
 //   - openai_gpt_model: Default GPT model name
 //   - openai_dalle_model: Default DALL-E model name
-//   - api_version: API version (for Azure)
+//   - api_version: API version (used by Azure and Anthropic)
 //   - legacy_mode: Use legacy mode for data conversion (default: true)
 //
 // The chat function supports both blocking and streaming modes:

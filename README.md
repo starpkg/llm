@@ -190,7 +190,7 @@ Generates an image using DALL-E or GPT Image 1. Parameters:
   - DALL-E 3: "vivid", "natural"
 - `response_format`: Response format (DALL-E only, default: "url")
   - DALL-E 2/3: "url", "b64_json"
-  - GPT Image 1: Always returns base64-encoded images (parameter ignored)
+  - GPT Image 1: parameter ignored; the API returns base64, which the module decodes and returns as raw image bytes
 - `background`: Background type (GPT Image 1 only, default: "auto")
   - GPT Image 1: "auto", "transparent", "opaque"
 - `moderation`: Content moderation level (GPT Image 1 only, default: "auto")
@@ -203,7 +203,7 @@ Generates an image using DALL-E or GPT Image 1. Parameters:
 - `full_response`: Return the full API response (default: false)
 - `allow_error`: Return None instead of an error (default: false)
 
-Returns the image URL (DALL-E) or base64-encoded image data (GPT Image 1), or a list if `n > 1`.
+Returns a URL string (DALL-E with `response_format="url"`, the default) or raw image bytes (DALL-E with `response_format="b64_json"`, and always for GPT Image 1 — the base64 returned by the API is decoded before it reaches the script). When `n > 1`, returns a list of those values. With `full_response=True`, returns the converted full API response instead.
 
 ## Examples
 
@@ -252,7 +252,7 @@ gpt_image = draw(
     background="transparent",
     output_format="png"
 )
-print("GPT Image 1 base64 data length:", len(gpt_image))
+print("GPT Image 1 image bytes length:", len(gpt_image))
 
 # Using content moderation with GPT Image 1
 moderated_image = draw(
@@ -263,7 +263,7 @@ moderated_image = draw(
     output_format="webp",
     output_compression=85
 )
-print("Moderated image data:", moderated_image[:100] + "...")
+print("Moderated image bytes length:", len(moderated_image))
 
 # Generate multiple images with GPT Image 1
 multiple_images = draw(
