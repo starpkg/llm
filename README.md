@@ -3,17 +3,19 @@
 [![godoc](https://pkg.go.dev/badge/github.com/starpkg/llm.svg)](https://pkg.go.dev/github.com/starpkg/llm)
 [![license](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-A powerful Starlark module for interacting with OpenAI and OpenAI-compatible API services. Easily generate text using chat completions and create images with DALL-E from your Starlark scripts.
+A Starlark module for interacting with OpenAI and OpenAI-compatible API services. Generate text with chat completions and create images with DALL-E / GPT Image 1, directly from your Starlark scripts.
+
+Within the Star\* ecosystem — *"starpkg = support for necessary LOCAL operations + simple abstractions over common ONLINE services, for ease of use"* — `llm` is an **online-service abstraction**. It wraps a remote SaaS API (OpenAI and any OpenAI-compatible endpoint: Azure OpenAI, Anthropic, self-hosted gateways) behind three small script-facing builtins, so a script reaches a chat or image model without juggling HTTP, auth headers, retries, or response shapes. It is an L4 domain module: it depends downward on `starpkg/base` (the module/config system), `1set/starlet` (the Machine + `dataconv`), and transitively `1set/starlight` + `go.starlark.net`. Nothing in the ecosystem depends on it.
 
 ## Features
 
-- Chat completions using OpenAI GPT models
-- Image generation using DALL-E models
-- Support for OpenAI API
-- Support for Azure OpenAI services
-- Support for multimodal inputs (text and images)
-- **Streaming mode** for real-time responses
-- Customizable retry behavior and error handling
+- Chat completions using OpenAI GPT (and reasoning) models — `chat`
+- Image generation using DALL-E 2/3 and GPT Image 1 — `draw`
+- Multi-turn conversations and multimodal inputs (text + images) — `message`
+- Works against the OpenAI API, Azure OpenAI Service, the Anthropic Claude API, and any OpenAI-compatible endpoint
+- **Streaming mode** for real-time responses, with an optional per-chunk callback
+- Custom / provider-specific parameters via `kwargs`
+- Customizable retry behavior and graceful error handling (`retry`, `allow_error`)
 
 ## Installation
 
@@ -81,15 +83,47 @@ print("Image URL:", image_url)
 
 ### Configuration
 
-The module has the following configuration options:
+The module is built on `starpkg/base`'s configurable-module system. Each option below has a default, can be set from the host's environment, and is exposed to scripts as generated setter/getter builtins.
 
-- `openai_provider`: The provider type ("openai", "azure", or "anthropic")
-- `openai_endpoint_url`: The API endpoint URL (required for Azure, optional for OpenAI)
-- `openai_api_key`: The API key (required)
-- `openai_gpt_model`: The default GPT model to use
-- `openai_dalle_model`: The default DALL-E model to use
-- `api_version`: The API version (for Azure, default: "2024-02-01")
-- `legacy_mode`: Use legacy mode for data conversion (default: true)
+| Option | Type | Default | Environment Variable | Description |
+|--------|------|---------|----------------------|-------------|
+| `openai_provider` | string | `openai` | `LLM_OPENAI_PROVIDER` | Provider type: `openai`, `azure`, or `anthropic` |
+| `openai_endpoint_url` | string | `""` | `LLM_OPENAI_ENDPOINT_URL` | API endpoint base URL (required for Azure; overrides the default for the others) |
+| `openai_api_key` | string | `""` | `LLM_OPENAI_API_KEY` | API key (required). Secret: no getter is exposed to scripts |
+| `openai_gpt_model` | string | `""` | `LLM_OPENAI_GPT_MODEL` | Default model for `chat` |
+| `openai_dalle_model` | string | `""` | `LLM_OPENAI_DALLE_MODEL` | Default model for `draw` |
+| `api_version` | string | `2024-02-01` | `LLM_API_VERSION` | API version (used by Azure and Anthropic) |
+| `legacy_mode` | bool | `true` | `LLM_LEGACY_MODE` | Conversion mode for `full_response` objects (see below) |
+
+Module options serve as defaults; they are used when the corresponding argument is not passed to `chat` / `draw`.
+
+#### Setting configuration from a script
+
+For every option, `base` generates a `set_<option>` builtin; every **non-secret** option also gets a `get_<option>` builtin. Because `openai_api_key` is marked secret, `set_openai_api_key` exists but **no `get_openai_api_key`** is exposed (the key cannot be read back from a script).
+
+Setters (all take a single value):
+
+- `set_openai_provider`, `set_openai_endpoint_url`, `set_openai_api_key`, `set_openai_gpt_model`, `set_openai_dalle_model`, `set_api_version`, `set_legacy_mode`
+
+Getters (non-secret options only):
+
+- `get_openai_provider`, `get_openai_endpoint_url`, `get_openai_gpt_model`, `get_openai_dalle_model`, `get_api_version`, `get_legacy_mode`
+
+```python
+load("llm", "set_openai_endpoint_url", "set_openai_api_key", "set_openai_gpt_model", "chat")
+
+set_openai_endpoint_url("https://api.openai.com/v1")
+set_openai_api_key("sk-...")          # secret: no get_openai_api_key
+set_openai_gpt_model("gpt-4o")
+
+print(chat(text="Hello!"))
+```
+
+These builtins are also reachable as module attributes — e.g. `llm.set_openai_api_key("sk-...")` — when the module is loaded under its `llm` name rather than via `load(...)` of individual symbols.
+
+#### `legacy_mode` and `full_response`
+
+`legacy_mode` controls how `full_response=True` results are turned into Starlark values. When `true` (the default) the response is exposed via direct struct access (field names like `choices[0].message.content`). When `false`, the response is converted through JSON. The default preserves the historical behavior; flip it with `set_legacy_mode(False)` only if you need JSON-shaped access.
 
 ### Functions
 
@@ -241,7 +275,7 @@ multiple_images = draw(
     output_format="jpeg",
     output_compression=90
 )
-print(f"Generated {len(multiple_images)} images")
+print("Generated {} images".format(len(multiple_images)))
 
 # Get full response with token usage information
 full_resp = draw(
@@ -253,9 +287,9 @@ full_resp = draw(
 print("Image data:", full_resp.data[0].b64_json[:100] + "...")
 if hasattr(full_resp, "usage"):
     usage = full_resp.usage
-    print(f"Total tokens: {usage.total_tokens}")
-    print(f"Input tokens: {usage.input_tokens}")
-    print(f"Output tokens: {usage.output_tokens}")
+    print("Total tokens: {}".format(usage.total_tokens))
+    print("Input tokens: {}".format(usage.input_tokens))
+    print("Output tokens: {}".format(usage.output_tokens))
 ```
 
 ### Streaming Mode
@@ -269,8 +303,8 @@ def handle_chunk(chunk):
     if len(chunk.choices) > 0:
         delta = chunk.choices[0].delta
         if delta.content:
-            # Print each chunk as it arrives
-            print(delta.content, end="", flush=True)
+            # Print each chunk as it arrives (Starlark's print always adds a newline)
+            print(delta.content)
 
 # Stream response with a callback
 full_response = chat(
@@ -307,9 +341,9 @@ def process_chunk(chunk):
         if delta.content:
             tracker["tokens"] += 1
             
-            # Show progress
+            # Show progress (Starlark's print always adds a newline)
             if tracker["tokens"] % 10 == 0:
-                print(".", end="", flush=True)
+                print(".")
 
 # Generate a longer response with progress tracking
 response = chat(
@@ -339,9 +373,9 @@ full_resp = chat(
 # Access token usage information
 if hasattr(full_resp, "usage"):
     usage = full_resp.usage
-    print(f"Prompt tokens: {usage.prompt_tokens}")
-    print(f"Completion tokens: {usage.completion_tokens}")
-    print(f"Total tokens: {usage.total_tokens}")
+    print("Prompt tokens: {}".format(usage.prompt_tokens))
+    print("Completion tokens: {}".format(usage.completion_tokens))
+    print("Total tokens: {}".format(usage.total_tokens))
     
     # Calculate approximate cost (example rates for gpt-4)
     # Note: Token counts are accumulated from all stream responses for better accuracy
@@ -349,7 +383,7 @@ if hasattr(full_resp, "usage"):
     completion_cost = usage.completion_tokens * 0.00006  # $0.06 per 1000 tokens
     total_cost = prompt_cost + completion_cost
     
-    print(f"Approximate cost: ${total_cost:.6f}")
+    print("Approximate cost: ${}".format(total_cost))
 ```
 
 ### Multimodal Interaction
@@ -389,11 +423,11 @@ print(response)
 ### Using Reasoning Models
 
 ```python
-load("llm", "chat")
+load("llm", "chat", "set_openai_endpoint_url", "set_openai_api_key")
 
 # Set endpoint and API key for a reasoning-capable model provider
-llm.set_openai_endpoint_url("https://reasoning-model-api-endpoint.com")
-llm.set_openai_api_key("your-api-key-here")
+set_openai_endpoint_url("https://reasoning-model-api-endpoint.com")
+set_openai_api_key("your-api-key-here")
 
 # Call a reasoning-capable model with specific reasoning effort
 response = chat(
