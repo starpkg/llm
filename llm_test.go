@@ -353,39 +353,33 @@ func onePixelPNGBase64() string {
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
+// wantString fails the test when got != want, labelling with name.
+func wantString(t *testing.T, name, got, want string) {
+	t.Helper()
+	if got != want {
+		t.Errorf("%s = %q, want %q", name, got, want)
+	}
+}
+
 func TestModuleConstruction(t *testing.T) {
 	// NewModule: defaults are empty / preset, legacy mode on, api_version default.
 	m := NewModule()
-	if got := m.ext.GetString(configKeyProvider, ""); got != ProviderOpenAI {
-		t.Errorf("default provider = %q, want %q", got, ProviderOpenAI)
-	}
-	if got := m.ext.GetString(configKeyAPIVersion, ""); got != defaultAPIVersion {
-		t.Errorf("default api_version = %q, want %q", got, defaultAPIVersion)
-	}
-	if got := m.ext.GetBool(configKeyLegacyMode, false); got != true {
-		t.Errorf("default legacy_mode = %v, want true", got)
-	}
-	if got := m.ext.GetString(configKeyGPTModel, "sentinel"); got != "" {
-		t.Errorf("default gpt model = %q, want empty", got)
+	wantString(t, "default provider", m.ext.GetString(configKeyProvider, ""), ProviderOpenAI)
+	wantString(t, "default api_version", m.ext.GetString(configKeyAPIVersion, ""), defaultAPIVersion)
+	wantString(t, "default gpt model", m.ext.GetString(configKeyGPTModel, "sentinel"), "")
+	if !m.ext.GetBool(configKeyLegacyMode, false) {
+		t.Error("default legacy_mode = false, want true")
 	}
 
 	// NewModuleWithConfig: presets applied; empty apiVersion falls back to default.
 	mc := NewModuleWithConfig(ProviderAzure, "https://e.example", "k", "gpt-x", "dall-e-3", "")
-	if got := mc.ext.GetString(configKeyProvider, ""); got != ProviderAzure {
-		t.Errorf("preset provider = %q, want azure", got)
-	}
-	if got := mc.ext.GetString(configKeyAPIVersion, ""); got != defaultAPIVersion {
-		t.Errorf("empty apiVersion should default to %q, got %q", defaultAPIVersion, got)
-	}
-	if got := mc.ext.GetString(configKeyGPTModel, ""); got != "gpt-x" {
-		t.Errorf("preset gpt model = %q, want gpt-x", got)
-	}
+	wantString(t, "preset provider", mc.ext.GetString(configKeyProvider, ""), ProviderAzure)
+	wantString(t, "empty apiVersion -> default", mc.ext.GetString(configKeyAPIVersion, ""), defaultAPIVersion)
+	wantString(t, "preset gpt model", mc.ext.GetString(configKeyGPTModel, ""), "gpt-x")
 
 	// Explicit apiVersion is preserved.
 	mv := NewModuleWithConfig(ProviderAnthropic, "", "k", "", "", "2099-01-01")
-	if got := mv.ext.GetString(configKeyAPIVersion, ""); got != "2099-01-01" {
-		t.Errorf("explicit apiVersion = %q, want 2099-01-01", got)
-	}
+	wantString(t, "explicit apiVersion", mv.ext.GetString(configKeyAPIVersion, ""), "2099-01-01")
 
 	// SetClient is the test seam: getClient returns the injected client verbatim.
 	inj := oai.NewClientWithConfig(oai.DefaultConfig("x"))
@@ -444,14 +438,17 @@ func TestGetClientSelection(t *testing.T) {
 func TestModelAndDictHelpers(t *testing.T) {
 	// getModel: call-site value wins; falls back to config; empty when neither.
 	m := NewModuleWithConfig(ProviderOpenAI, "", "k", "cfg-gpt", "", "")
-	if got := m.getModel(configKeyGPTModel, "call-gpt"); got != "call-gpt" {
-		t.Errorf("getModel call-site = %q, want call-gpt", got)
+	modelCases := []struct {
+		key, val, want string
+	}{
+		{configKeyGPTModel, "call-gpt", "call-gpt"}, // call-site value wins
+		{configKeyGPTModel, "", "cfg-gpt"},          // falls back to config
+		{configKeyDALLEModel, "", ""},               // empty when neither
 	}
-	if got := m.getModel(configKeyGPTModel, ""); got != "cfg-gpt" {
-		t.Errorf("getModel fallback = %q, want cfg-gpt", got)
-	}
-	if got := m.getModel(configKeyDALLEModel, ""); got != "" {
-		t.Errorf("getModel unset = %q, want empty", got)
+	for _, c := range modelCases {
+		if got := m.getModel(c.key, c.val); got != c.want {
+			t.Errorf("getModel(%q,%q) = %q, want %q", c.key, c.val, got, c.want)
+		}
 	}
 
 	// getStringFromDict: string value, bytes value, missing key, wrong type.
@@ -459,18 +456,20 @@ func TestModelAndDictHelpers(t *testing.T) {
 	d.SetKey(starlark.String("s"), starlark.String("hello"))
 	d.SetKey(starlark.String("b"), starlark.Bytes("world"))
 	d.SetKey(starlark.String("n"), starlark.MakeInt(7))
-
-	if v, ok := getStringFromDict(d, "s"); !ok || v != "hello" {
-		t.Errorf("string value = %q,%v want hello,true", v, ok)
+	dictCases := []struct {
+		key     string
+		wantVal string
+		wantOK  bool
+	}{
+		{"s", "hello", true},   // string value
+		{"b", "world", true},   // bytes value
+		{"missing", "", false}, // absent key
+		{"n", "", false},       // non-string value rejected
 	}
-	if v, ok := getStringFromDict(d, "b"); !ok || v != "world" {
-		t.Errorf("bytes value = %q,%v want world,true", v, ok)
-	}
-	if v, ok := getStringFromDict(d, "missing"); ok || v != "" {
-		t.Errorf("missing key = %q,%v want '',false", v, ok)
-	}
-	if v, ok := getStringFromDict(d, "n"); ok || v != "" {
-		t.Errorf("int value should be rejected = %q,%v want '',false", v, ok)
+	for _, c := range dictCases {
+		if v, ok := getStringFromDict(d, c.key); v != c.wantVal || ok != c.wantOK {
+			t.Errorf("getStringFromDict(%q) = %q,%v want %q,%v", c.key, v, ok, c.wantVal, c.wantOK)
+		}
 	}
 }
 
@@ -561,9 +560,12 @@ func TestChatArgErrors(t *testing.T) {
 			wantErr: "at least one of text, image",
 		},
 		{
+			// The OS-specific tail of the open error differs across platforms
+			// (Unix "no such file" vs Windows "cannot find the path"), so assert
+			// on the platform-neutral parts: the message index and the path.
 			name:    "bad image file",
 			script:  `chat(messages=[{"role": "user", "image_file": "/no/such/file.png"}], model="gpt-x", allow_error=True)`,
-			wantErr: "no such file",
+			wantErr: "message 1: open /no/such/file.png",
 		},
 	}
 	for _, tc := range tests {
@@ -610,6 +612,66 @@ func TestDrawArgErrors(t *testing.T) {
 	}
 }
 
+// soleMessage runs script against m, fails the test if it errors, and returns
+// the single chat message the loopback handler captured into gotReq.
+func soleMessage(t *testing.T, m *Module, gotReq *oai.ChatCompletionRequest, script string) oai.ChatCompletionMessage {
+	t.Helper()
+	if err := runModuleScript(t, m, script); err != nil {
+		t.Fatalf("script failed: %v\nscript: %s", err, script)
+	}
+	if len(gotReq.Messages) != 1 {
+		t.Fatalf("want exactly 1 message, got %+v", gotReq.Messages)
+	}
+	return gotReq.Messages[0]
+}
+
+// imageURLOfPart returns the data/url string of an image_url part, or "".
+func imageURLOfPart(p oai.ChatMessagePart) string {
+	if p.Type == oai.ChatMessagePartTypeImageURL && p.ImageURL != nil {
+		return p.ImageURL.URL
+	}
+	return ""
+}
+
+// hasTextPart reports whether parts contains a text part equal to text.
+func hasTextPart(parts []oai.ChatMessagePart, text string) bool {
+	for _, p := range parts {
+		if p.Type == oai.ChatMessagePartTypeText && p.Text == text {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDataImagePart reports whether parts contains an image part whose URL is a
+// data: URL (i.e. an inline-encoded image).
+func hasDataImagePart(parts []oai.ChatMessagePart) bool {
+	for _, p := range parts {
+		if strings.HasPrefix(imageURLOfPart(p), "data:") {
+			return true
+		}
+	}
+	return false
+}
+
+// assertSoleImageURL fails unless msg has exactly one image_url part whose URL
+// equals want (when want is a full URL) or is prefixed by want (e.g. "data:").
+func assertSoleImageURL(t *testing.T, name string, msg oai.ChatCompletionMessage, want string) {
+	t.Helper()
+	if len(msg.MultiContent) != 1 {
+		t.Errorf("%s: want 1 part, got %+v", name, msg.MultiContent)
+		return
+	}
+	got := imageURLOfPart(msg.MultiContent[0])
+	ok := got == want
+	if strings.HasSuffix(want, ":") {
+		ok = strings.HasPrefix(got, want)
+	}
+	if !ok {
+		t.Errorf("%s: image URL = %q, want %q", name, got, want)
+	}
+}
+
 func TestMultimodalMessages(t *testing.T) {
 	// Exercise the message -> MultiContent conversion for every image source
 	// (inline bytes, url, and file) without a network: assert the request the
@@ -634,56 +696,29 @@ func TestMultimodalMessages(t *testing.T) {
 		t.Fatalf("write test png: %v", err)
 	}
 
-	// text + inline image bytes -> a MultiContent message with text + data URL.
-	if err := runModuleScript(t, m, withAssert(`load("llm", "chat")
-chat(messages=[{"role": "user", "text": "describe", "image": b"\x89PNG\r\n\x1a\n"}])`)); err != nil {
-		t.Fatalf("inline image bytes chat failed: %v", err)
-	}
-	if len(gotReq.Messages) != 1 || len(gotReq.Messages[0].MultiContent) != 2 {
-		t.Fatalf("inline image: want 1 msg with 2 parts, got %+v", gotReq.Messages)
-	}
-	var sawText, sawImage bool
-	for _, p := range gotReq.Messages[0].MultiContent {
-		switch p.Type {
-		case oai.ChatMessagePartTypeText:
-			sawText = p.Text == "describe"
-		case oai.ChatMessagePartTypeImageURL:
-			sawImage = p.ImageURL != nil && strings.HasPrefix(p.ImageURL.URL, "data:")
-		}
-	}
-	if !sawText || !sawImage {
-		t.Errorf("inline image parts: text=%v image=%v, want both true (%+v)", sawText, sawImage, gotReq.Messages[0].MultiContent)
+	// text + inline image bytes -> a MultiContent message with a text part and
+	// an inline data-URL image part.
+	msg := soleMessage(t, m, &gotReq, `load("llm", "chat")
+chat(messages=[{"role": "user", "text": "describe", "image": b"\x89PNG\r\n\x1a\n"}])`)
+	if len(msg.MultiContent) != 2 || !hasTextPart(msg.MultiContent, "describe") || !hasDataImagePart(msg.MultiContent) {
+		t.Errorf("inline image: want text + data-image parts, got %+v", msg.MultiContent)
 	}
 
-	// image_url -> a single image_url part carrying the URL verbatim.
-	if err := runModuleScript(t, m, withAssert(`load("llm", "chat")
-chat(messages=[{"role": "user", "image_url": "https://x/y.png"}])`)); err != nil {
-		t.Fatalf("image_url chat failed: %v", err)
-	}
-	if len(gotReq.Messages) != 1 || len(gotReq.Messages[0].MultiContent) != 1 ||
-		gotReq.Messages[0].MultiContent[0].ImageURL == nil ||
-		gotReq.Messages[0].MultiContent[0].ImageURL.URL != "https://x/y.png" {
-		t.Errorf("image_url part wrong: %+v", gotReq.Messages)
-	}
+	// Each single-image source yields exactly one image_url part. image_url is
+	// passed verbatim; image_file is read and embedded as a data: URL.
+	urlMsg := soleMessage(t, m, &gotReq, `load("llm", "chat")
+chat(messages=[{"role": "user", "image_url": "https://x/y.png"}])`)
+	assertSoleImageURL(t, "image_url", urlMsg, "https://x/y.png")
 
-	// image_file -> reads the file and embeds a data URL with the detected mime.
-	if err := runModuleScript(t, m, withAssert(fmt.Sprintf(`load("llm", "chat")
-chat(messages=[{"role": "user", "image_file": %q}])`, imgPath))); err != nil {
-		t.Fatalf("image_file chat failed: %v", err)
-	}
-	if len(gotReq.Messages) != 1 || len(gotReq.Messages[0].MultiContent) != 1 ||
-		gotReq.Messages[0].MultiContent[0].ImageURL == nil ||
-		!strings.HasPrefix(gotReq.Messages[0].MultiContent[0].ImageURL.URL, "data:") {
-		t.Errorf("image_file part wrong: %+v", gotReq.Messages)
-	}
+	fileMsg := soleMessage(t, m, &gotReq, fmt.Sprintf(`load("llm", "chat")
+chat(messages=[{"role": "user", "image_file": %q}])`, imgPath))
+	assertSoleImageURL(t, "image_file", fileMsg, "data:")
 
-	// Top-level text + image args build an implicit prepended user message.
-	if err := runModuleScript(t, m, withAssert(`load("llm", "chat")
-chat(text="hi there")`)); err != nil {
-		t.Fatalf("top-level text chat failed: %v", err)
-	}
-	if len(gotReq.Messages) != 1 || gotReq.Messages[0].Content != "hi there" || gotReq.Messages[0].Role != oai.ChatMessageRoleUser {
-		t.Errorf("implicit user message wrong: %+v", gotReq.Messages)
+	// Top-level text arg builds an implicit prepended user message (text-only).
+	msg = soleMessage(t, m, &gotReq, `load("llm", "chat")
+chat(text="hi there")`)
+	if msg.Content != "hi there" || msg.Role != oai.ChatMessageRoleUser {
+		t.Errorf("implicit user message wrong: %+v", msg)
 	}
 }
 
@@ -772,17 +807,15 @@ chat(text="hi", response_format="json", max_completion_tokens=42, reasoning_effo
      stop=["END", "STOP"], temperature=0.2, top_p=0.9, frequency_penalty=0.5, presence_penalty=0.25)`)); err != nil {
 		t.Fatalf("shaping chat failed: %v", err)
 	}
-	if gotReq.ResponseFormat == nil || gotReq.ResponseFormat.Type != oai.ChatCompletionResponseFormatTypeJSONObject {
-		t.Errorf("response_format=json not applied: %+v", gotReq.ResponseFormat)
+	rf := ""
+	if gotReq.ResponseFormat != nil {
+		rf = string(gotReq.ResponseFormat.Type)
 	}
+	wantString(t, "response_format type", rf, string(oai.ChatCompletionResponseFormatTypeJSONObject))
+	wantString(t, "reasoning_effort", gotReq.ReasoningEffort, "high")
+	wantString(t, "stop sequences", strings.Join(gotReq.Stop, ","), "END,STOP")
 	if gotReq.MaxCompletionTokens != 42 {
 		t.Errorf("max_completion_tokens = %d, want 42", gotReq.MaxCompletionTokens)
-	}
-	if gotReq.ReasoningEffort != "high" {
-		t.Errorf("reasoning_effort = %q, want high", gotReq.ReasoningEffort)
-	}
-	if len(gotReq.Stop) != 2 || gotReq.Stop[0] != "END" || gotReq.Stop[1] != "STOP" {
-		t.Errorf("stop = %v, want [END STOP]", gotReq.Stop)
 	}
 
 	// legacy_mode=false: full_response goes through GoToStarlarkViaJSON. The
@@ -990,13 +1023,16 @@ chat(text="hi", stream=True, n=%s, allow_error=True)`, n))
 	}
 
 	// clampStreamChoices unit: negative -> 0, in-range -> identity, huge -> cap.
-	if got := clampStreamChoices(-5); got != 0 {
-		t.Errorf("clampStreamChoices(-5) = %d, want 0", got)
+	clampCases := []struct{ in, want int }{
+		{-5, 0},
+		{0, 0},
+		{3, 3},
+		{maxStreamChoices, maxStreamChoices},
+		{maxStreamChoices + 100, maxStreamChoices},
 	}
-	if got := clampStreamChoices(3); got != 3 {
-		t.Errorf("clampStreamChoices(3) = %d, want 3", got)
-	}
-	if got := clampStreamChoices(maxStreamChoices + 100); got != maxStreamChoices {
-		t.Errorf("clampStreamChoices(huge) = %d, want %d", got, maxStreamChoices)
+	for _, c := range clampCases {
+		if got := clampStreamChoices(c.in); got != c.want {
+			t.Errorf("clampStreamChoices(%d) = %d, want %d", c.in, got, c.want)
+		}
 	}
 }
