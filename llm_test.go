@@ -893,6 +893,64 @@ assert.eq(chat(text="hi", retry=2, allow_error=True), None)`)); err != nil {
 	if calls500 != 2 {
 		t.Errorf("500 with allow_error retried %d times, want 2", calls500)
 	}
+
+	// retry=0 must NOT skip the request loop and silently return None (a false
+	// success): it is clamped to a single attempt that actually calls the API.
+	var calls200 int
+	h200 := func(w http.ResponseWriter, _ *http.Request) {
+		calls200++
+		writeJSON(w, oai.ChatCompletionResponse{ID: "c", Model: "gpt-x", Choices: []oai.ChatCompletionChoice{
+			{Index: 0, Message: oai.ChatCompletionMessage{Role: "assistant", Content: "hi"}, FinishReason: "stop"},
+		}})
+	}
+	m200, _ := newTestServerModule(t, "gpt-x", "", h200)
+	if err := runModuleScript(t, m200, withAssert(`load("llm", "chat")
+assert.eq(chat(text="hi", retry=0), "hi")`)); err != nil {
+		t.Fatalf("chat(retry=0) should call the API and return content, not None: %v", err)
+	}
+	if calls200 != 1 {
+		t.Errorf("retry=0 made %d API calls, want 1 (must not skip the request)", calls200)
+	}
+}
+
+// TestImageFileReadAndRetryClamp covers two STAR-85 robustness fixes: reading a
+// whole image file (a single Read can short-read) and clamping a non-positive
+// retry to one attempt.
+func TestImageFileReadAndRetryClamp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.png")
+	want := bytes.Repeat([]byte("A"), 5000)
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataURL, err := imageFileToBase64(path)
+	if err != nil {
+		t.Fatalf("imageFileToBase64: %v", err)
+	}
+	comma := strings.IndexByte(dataURL, ',')
+	if comma < 0 {
+		t.Fatalf("malformed data URL (no comma)")
+	}
+	got, err := base64.StdEncoding.DecodeString(dataURL[comma+1:])
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("round-trip mismatch: got %d bytes, want %d", len(got), len(want))
+	}
+
+	m := NewModule()
+	b := starlark.NewBuiltin("chat", func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
+		return nil, nil
+	})
+	for _, r := range []int{0, -5} {
+		p, err := m.parseChatParams(b, starlark.Tuple{}, []starlark.Tuple{{starlark.String("retry"), starlark.MakeInt(r)}})
+		if err != nil {
+			t.Fatalf("parseChatParams(retry=%d): %v", r, err)
+		}
+		if p.retryTimes != 1 {
+			t.Errorf("retry=%d clamped to %d, want 1", r, p.retryTimes)
+		}
+	}
 }
 
 func TestStreamingChat(t *testing.T) {
