@@ -878,43 +878,9 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 			return nil, delivered, streamErr
 		}
 
-		// Keep track of the last response for metadata
 		lastStreamResp = streamResp
-
-		// Store the ID from the first response
-		if fullResp.ID == "" && streamResp.ID != "" {
-			fullResp.ID = streamResp.ID
-		}
-
-		// Accumulate token usage from this chunk if available
-		if streamResp.Usage != nil {
-			usageFound = true
-			accumulatedUsage.PromptTokens += streamResp.Usage.PromptTokens
-			accumulatedUsage.CompletionTokens += streamResp.Usage.CompletionTokens
-			accumulatedUsage.TotalTokens += streamResp.Usage.TotalTokens
-		}
-
-		// Process each choice in the stream response
-		for i, choice := range streamResp.Choices {
-			if i < len(contentBuilders) {
-				// Append the delta content to the builder
-				contentBuilders[i].WriteString(choice.Delta.Content)
-
-				// Initialize the choice in the full response if not done yet
-				if fullResp.Choices[i].Message.Role == "" {
-					fullResp.Choices[i].Message.Role = choice.Delta.Role
-					if choice.Delta.Role == "" {
-						fullResp.Choices[i].Message.Role = oai.ChatMessageRoleAssistant
-					}
-				}
-
-				// Set index and finish reason if provided
-				fullResp.Choices[i].Index = choice.Index
-				if choice.FinishReason != "" {
-					fullResp.Choices[i].FinishReason = choice.FinishReason
-				}
-			}
-		}
+		applyChunkMetadata(fullResp, &streamResp, &accumulatedUsage, &usageFound)
+		applyStreamChoices(fullResp, contentBuilders, streamResp.Choices)
 
 		// Call the stream callback if provided. Mark delivered before invoking it:
 		// the callback is a script-visible side effect, so once it runs the attempt
@@ -927,33 +893,67 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 		}
 	}
 
-	// Combine the content from each chunk
+	finalizeStreamResponse(fullResp, contentBuilders, &lastStreamResp, accumulatedUsage, usageFound)
+	return fullResp, delivered, nil
+}
+
+// applyChunkMetadata records the response ID (from the first chunk that carries
+// one) and accumulates token usage across chunks.
+func applyChunkMetadata(fullResp *oai.ChatCompletionResponse, streamResp *oai.ChatCompletionStreamResponse, accUsage *oai.Usage, usageFound *bool) {
+	if fullResp.ID == "" && streamResp.ID != "" {
+		fullResp.ID = streamResp.ID
+	}
+	if streamResp.Usage != nil {
+		*usageFound = true
+		accUsage.PromptTokens += streamResp.Usage.PromptTokens
+		accUsage.CompletionTokens += streamResp.Usage.CompletionTokens
+		accUsage.TotalTokens += streamResp.Usage.TotalTokens
+	}
+}
+
+// applyStreamChoices folds each chunk's per-choice delta into the accumulating
+// response, dropping any choice index beyond the pre-allocated bound.
+func applyStreamChoices(fullResp *oai.ChatCompletionResponse, contentBuilders []strings.Builder, choices []oai.ChatCompletionStreamChoice) {
+	for i, choice := range choices {
+		if i >= len(contentBuilders) {
+			continue
+		}
+		contentBuilders[i].WriteString(choice.Delta.Content)
+		if fullResp.Choices[i].Message.Role == "" {
+			fullResp.Choices[i].Message.Role = choice.Delta.Role
+			if choice.Delta.Role == "" {
+				fullResp.Choices[i].Message.Role = oai.ChatMessageRoleAssistant
+			}
+		}
+		fullResp.Choices[i].Index = choice.Index
+		if choice.FinishReason != "" {
+			fullResp.Choices[i].FinishReason = choice.FinishReason
+		}
+	}
+}
+
+// finalizeStreamResponse combines the per-choice content and copies usage and
+// metadata from the accumulated / last stream chunk.
+func finalizeStreamResponse(fullResp *oai.ChatCompletionResponse, contentBuilders []strings.Builder, last *oai.ChatCompletionStreamResponse, accUsage oai.Usage, usageFound bool) {
 	for i := range fullResp.Choices {
 		if i < len(contentBuilders) {
 			fullResp.Choices[i].Message.Content = contentBuilders[i].String()
 		}
 	}
-
-	// Use accumulated token usage if we found any
 	if usageFound {
-		fullResp.Usage = accumulatedUsage
-	} else if lastStreamResp.Usage != nil {
-		// Fallback to the last response if we didn't accumulate anything
-		fullResp.Usage = *lastStreamResp.Usage
+		fullResp.Usage = accUsage
+	} else if last.Usage != nil {
+		fullResp.Usage = *last.Usage
 	}
-
-	// Copy any available metadata from the last response
-	if lastStreamResp.Created > 0 {
-		fullResp.Created = lastStreamResp.Created
+	if last.Created > 0 {
+		fullResp.Created = last.Created
 	}
-	if lastStreamResp.Model != "" {
-		fullResp.Model = lastStreamResp.Model
+	if last.Model != "" {
+		fullResp.Model = last.Model
 	}
-	if lastStreamResp.SystemFingerprint != "" {
-		fullResp.SystemFingerprint = lastStreamResp.SystemFingerprint
+	if last.SystemFingerprint != "" {
+		fullResp.SystemFingerprint = last.SystemFingerprint
 	}
-
-	return fullResp, delivered, nil
 }
 
 // callStreamCallback invokes the provided callback with a stream response
