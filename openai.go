@@ -51,6 +51,7 @@ import (
 	"github.com/1set/starlet/dataconv/types"
 	oai "github.com/sashabaranov/go-openai"
 	"github.com/starpkg/base"
+	"github.com/starpkg/base/util"
 	"go.starlark.net/starlark"
 )
 
@@ -191,10 +192,7 @@ func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleMo
 // genConfigOption creates a configuration option with common settings.
 // It sets up the name, description, default value, and environment variable.
 func genConfigOption[T any](name, description string, defaultValue T) *base.ConfigOption[T] {
-	return base.NewConfigOption(defaultValue).
-		WithName(name).
-		WithDescription(description).
-		WithEnvVar(strings.ToUpper(ModuleName + "_" + name))
+	return base.NewNamedConfigOption(ModuleName, name, description, defaultValue)
 }
 
 // newModuleWithOptions creates a Module with the given configuration options.
@@ -292,6 +290,11 @@ func (m *Module) genDrawFunc() starlark.Callable {
 			"retry?", &retryTimes, "full_response?", &fullResponse, "allow_error?", &allowError,
 		); err != nil {
 			return none, err
+		}
+		// A retry count below 1 would skip the image request loop and return a
+		// misleading "no image data" error without ever calling the API.
+		if retryTimes < 1 {
+			retryTimes = 1
 		}
 
 		// get prompt
@@ -647,6 +650,13 @@ func (m *Module) parseChatParams(b *starlark.Builtin, args starlark.Tuple, kwarg
 		return nil, err
 	}
 
+	// A retry count below 1 would make the request loop run zero times and
+	// silently return None (a false success) without ever calling the API; make
+	// at least one attempt.
+	if p.retryTimes < 1 {
+		p.retryTimes = 1
+	}
+
 	return p, nil
 }
 
@@ -790,7 +800,8 @@ func (m *Module) handleStreamingRequest(ctx context.Context, cli *oai.Client, re
 
 	// Try the request with retries
 	for i := 0; i < params.retryTimes; i++ {
-		fullResp, streamErr = m.processStream(ctx, cli, req, model, thread, params)
+		var delivered bool
+		fullResp, delivered, streamErr = m.processStream(ctx, cli, req, model, thread, params)
 
 		// If successful, return the result
 		if streamErr == nil {
@@ -800,6 +811,12 @@ func (m *Module) handleStreamingRequest(ctx context.Context, cli *oai.Client, re
 		// Check if this is a bad request error (no need to retry)
 		var ae *oai.APIError
 		if errors.As(streamErr, &ae) && ae != nil && ae.HTTPStatusCode == http.StatusBadRequest {
+			break
+		}
+
+		// If chunks were already delivered to stream_callback, a retry would
+		// re-deliver them (duplicate side effects); stop and surface the error.
+		if delivered {
 			break
 		}
 	}
@@ -815,12 +832,15 @@ func (m *Module) handleStreamingRequest(ctx context.Context, cli *oai.Client, re
 	return none, nil
 }
 
-// processStream handles a single streaming request attempt
-func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.ChatCompletionRequest, model string, thread *starlark.Thread, params *chatParams) (*oai.ChatCompletionResponse, error) {
+// processStream handles a single streaming request attempt. It also reports
+// whether it invoked stream_callback at least once: once a chunk has been
+// delivered to the script, the attempt must not be retried (a retry would
+// re-deliver already-seen chunks).
+func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.ChatCompletionRequest, model string, thread *starlark.Thread, params *chatParams) (resp *oai.ChatCompletionResponse, delivered bool, err error) {
 	// Create a stream for chat completion
 	stream, err := cli.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer stream.Close()
 
@@ -855,7 +875,7 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 				// End of stream is not an error
 				break
 			}
-			return nil, streamErr
+			return nil, delivered, streamErr
 		}
 
 		// Keep track of the last response for metadata
@@ -896,10 +916,13 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 			}
 		}
 
-		// Call the stream callback if provided
+		// Call the stream callback if provided. Mark delivered before invoking it:
+		// the callback is a script-visible side effect, so once it runs the attempt
+		// can no longer be safely retried.
 		if params.streamCallback != nil {
+			delivered = true
 			if err := m.callStreamCallback(thread, params.streamCallback, &streamResp); err != nil {
-				return nil, err
+				return nil, delivered, err
 			}
 		}
 	}
@@ -930,7 +953,7 @@ func (m *Module) processStream(ctx context.Context, cli *oai.Client, req oai.Cha
 		fullResp.SystemFingerprint = lastStreamResp.SystemFingerprint
 	}
 
-	return fullResp, nil
+	return fullResp, delivered, nil
 }
 
 // callStreamCallback invokes the provided callback with a stream response
@@ -1056,6 +1079,11 @@ func getStringFromDict(d *starlark.Dict, key string) (string, bool) {
 	return empty, false
 }
 
+// maxImageFileBytes bounds how much of an image file is read into memory (then
+// base64-encoded at ~1.33x). It is far above any vision-API input limit, so it
+// only stops a hostile or accidental huge path from exhausting host memory.
+const maxImageFileBytes = 64 << 20 // 64 MiB
+
 // imageFileToBase64 reads file and convert it to base64 data.
 func imageFileToBase64(filePath string) (string, error) {
 	file, err := os.Open(filePath)
@@ -1064,20 +1092,11 @@ func imageFileToBase64(filePath string) (string, error) {
 	}
 	defer file.Close()
 
-	fileInfo, err := file.Stat()
+	// Read the whole file (a single file.Read can short-read a large file) with a
+	// size cap so an oversized path can't exhaust memory.
+	fileBuffer, err := util.ReadAllLimited(file, maxImageFileBytes)
 	if err != nil {
 		return "", err
-	}
-
-	fileSize := fileInfo.Size()
-	fileBuffer := make([]byte, fileSize)
-
-	bytesRead, err := file.Read(fileBuffer)
-	if err != nil {
-		return "", err
-	}
-	if bytesRead != int(fileSize) {
-		return "", fmt.Errorf("expected to read %d bytes but read %d", fileSize, bytesRead)
 	}
 
 	base64Data := base64.StdEncoding.EncodeToString(fileBuffer)
