@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/1set/starlet"
 	oai "github.com/sashabaranov/go-openai"
@@ -145,6 +146,78 @@ test_kwargs_parsing()
 	// Check that there are no parsing errors
 	if strings.Contains(output, "_error:") {
 		t.Errorf("Kwargs parsing had errors. Output: %s", output)
+	}
+}
+
+func TestRequestTimeout(t *testing.T) {
+	// Default: the configured default in seconds.
+	if got := NewModule().requestTimeout(); got != defaultRequestTimeout*time.Second {
+		t.Errorf("default timeout = %v, want %ds", got, defaultRequestTimeout)
+	}
+	// A host/script value is honored.
+	t.Setenv("LLM_REQUEST_TIMEOUT", "5")
+	if got := NewModule().requestTimeout(); got != 5*time.Second {
+		t.Errorf("env timeout = %v, want 5s", got)
+	}
+	// Non-positive falls back to the default — the bound is never disabled.
+	t.Setenv("LLM_REQUEST_TIMEOUT", "0")
+	if got := NewModule().requestTimeout(); got != defaultRequestTimeout*time.Second {
+		t.Errorf("zero timeout = %v, want default", got)
+	}
+	// An absurd value clamps to the cap and stays positive (no overflow).
+	t.Setenv("LLM_REQUEST_TIMEOUT", "999999999999")
+	got := NewModule().requestTimeout()
+	if got <= 0 || got != maxRequestTimeoutSeconds*time.Second {
+		t.Errorf("huge timeout = %v, want positive cap", got)
+	}
+}
+
+func TestNewHTTPClient(t *testing.T) {
+	c := NewModule().newHTTPClient()
+	// No total timeout — that would truncate a long streaming response.
+	if c.Timeout != 0 {
+		t.Errorf("http.Client.Timeout = %v, want 0 (streams must not be capped)", c.Timeout)
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", c.Transport)
+	}
+	// The hang bounds are set from request_timeout (default 120s).
+	if tr.ResponseHeaderTimeout != defaultRequestTimeout*time.Second {
+		t.Errorf("ResponseHeaderTimeout = %v, want %ds", tr.ResponseHeaderTimeout, defaultRequestTimeout)
+	}
+	if tr.TLSHandshakeTimeout != defaultRequestTimeout*time.Second {
+		t.Errorf("TLSHandshakeTimeout = %v, want %ds", tr.TLSHandshakeTimeout, defaultRequestTimeout)
+	}
+}
+
+func TestBuildProviderConfig(t *testing.T) {
+	// OpenAI (default provider): a client config with the default base URL and a
+	// non-empty auth token.
+	cfg, err := NewModule().buildProviderConfig("sk-test", "gpt-4")
+	if err != nil {
+		t.Fatalf("openai: %v", err)
+	}
+	if cfg.BaseURL == "" {
+		t.Errorf("openai cfg = %+v, want a default base URL", cfg)
+	}
+
+	// Anthropic: defaults the base URL when no endpoint is set.
+	t.Setenv("LLM_OPENAI_PROVIDER", "anthropic")
+	if cfg, err := NewModule().buildProviderConfig("k", "claude"); err != nil || cfg.BaseURL != "https://api.anthropic.com" {
+		t.Errorf("anthropic base = %q (err %v), want the anthropic default", cfg.BaseURL, err)
+	}
+
+	// Azure requires an endpoint.
+	t.Setenv("LLM_OPENAI_PROVIDER", "azure")
+	if _, err := NewModule().buildProviderConfig("k", "m"); err == nil || !strings.Contains(err.Error(), "required for Azure") {
+		t.Errorf("azure without endpoint should error, got %v", err)
+	}
+
+	// An unknown provider is rejected.
+	t.Setenv("LLM_OPENAI_PROVIDER", "bogus")
+	if _, err := NewModule().buildProviderConfig("k", "m"); err == nil || !strings.Contains(err.Error(), "unsupported provider") {
+		t.Errorf("unknown provider should error, got %v", err)
 	}
 }
 

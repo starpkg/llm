@@ -8,6 +8,13 @@
 //   - openai_dalle_model: Default DALL-E model name
 //   - api_version: API version (used by Azure and Anthropic)
 //   - legacy_mode: Use legacy mode for data conversion (default: true)
+//   - request_timeout: Per-request timeout in seconds (default: 120). Total
+//     deadline for blocking chat/draw; connect+first-response bound for streaming
+//
+// Trust model: a script may set the provider/endpoint/key itself, so a
+// host-injected api_key can be sent to a script-chosen endpoint (only inject a
+// host key for trusted scripts), and image_file reads arbitrary host files
+// (bounded to 64 MiB) — see docs/API.md "Safety / trust model".
 //
 // The chat function supports both blocking and streaming modes:
 //   - In blocking mode (default), the function waits for the complete response
@@ -41,10 +48,12 @@ import (
 	"image/png"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/1set/starlet"
 	"github.com/1set/starlet/dataconv"
@@ -60,14 +69,28 @@ const ModuleName = "llm"
 
 // Configuration key constants
 const (
-	configKeyProvider    = "openai_provider"
-	configKeyEndpointURL = "openai_endpoint_url"
-	configKeyAPIKey      = "openai_api_key"
-	configKeyGPTModel    = "openai_gpt_model"
-	configKeyDALLEModel  = "openai_dalle_model"
-	configKeyAPIVersion  = "api_version"
-	configKeyLegacyMode  = "legacy_mode"
+	configKeyProvider       = "openai_provider"
+	configKeyEndpointURL    = "openai_endpoint_url"
+	configKeyAPIKey         = "openai_api_key"
+	configKeyGPTModel       = "openai_gpt_model"
+	configKeyDALLEModel     = "openai_dalle_model"
+	configKeyAPIVersion     = "api_version"
+	configKeyLegacyMode     = "legacy_mode"
+	configKeyRequestTimeout = "request_timeout"
 )
+
+// defaultRequestTimeout bounds how long a request may hang so a slow or hanging
+// endpoint can't stall the calling goroutine indefinitely. A BLOCKING request
+// (chat without stream, draw) gets it as a TOTAL deadline (connect through body).
+// A STREAMING chat gets it only as a connect + time-to-first-response bound (via
+// the transport), NOT a total deadline — a total cap would truncate a long
+// stream. A script may raise it; a non-positive value falls back to this default
+// (the bound is never disabled).
+const defaultRequestTimeout = 120 // seconds
+
+// maxRequestTimeoutSeconds caps request_timeout so an absurd value can't overflow
+// the seconds->nanosecond duration conversion into a negative (unbounded) one.
+const maxRequestTimeoutSeconds = 24 * 60 * 60 // one day
 
 // Provider type constants
 const (
@@ -168,6 +191,7 @@ func NewModule() *Module {
 		genConfigOption(configKeyDALLEModel, "DALL-E model name", empty),
 		genConfigOption(configKeyAPIVersion, "API version", defaultAPIVersion),
 		genConfigOption(configKeyLegacyMode, "Use legacy mode for data conversion", true),
+		genConfigOption(configKeyRequestTimeout, "Per-request timeout in seconds", defaultRequestTimeout),
 	)
 }
 
@@ -186,6 +210,7 @@ func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleMo
 		genConfigOption(configKeyDALLEModel, "DALL-E model name with preset value", dalleModel),
 		genConfigOption(configKeyAPIVersion, "API version with preset value", apiVersion),
 		genConfigOption(configKeyLegacyMode, "Use legacy mode for data conversion", true),
+		genConfigOption(configKeyRequestTimeout, "Per-request timeout in seconds", defaultRequestTimeout),
 	)
 }
 
@@ -196,7 +221,7 @@ func genConfigOption[T any](name, description string, defaultValue T) *base.Conf
 }
 
 // newModuleWithOptions creates a Module with the given configuration options.
-func newModuleWithOptions(providerOpt, endpointOpt, apiKeyOpt, gptModelOpt, dalleModelOpt, apiVersionOpt *base.ConfigOption[string], legacyModeOpt *base.ConfigOption[bool]) *Module {
+func newModuleWithOptions(providerOpt, endpointOpt, apiKeyOpt, gptModelOpt, dalleModelOpt, apiVersionOpt *base.ConfigOption[string], legacyModeOpt *base.ConfigOption[bool], requestTimeoutOpt *base.ConfigOption[int]) *Module {
 	cm, _ := base.NewConfigurableModuleWithConfigOptions(
 		providerOpt,
 		endpointOpt,
@@ -205,6 +230,7 @@ func newModuleWithOptions(providerOpt, endpointOpt, apiKeyOpt, gptModelOpt, dall
 		dalleModelOpt,
 		apiVersionOpt,
 		legacyModeOpt,
+		requestTimeoutOpt,
 	)
 	return &Module{
 		cfgMod: cm,
@@ -450,8 +476,10 @@ func (m *Module) genDrawFunc() starlark.Callable {
 			return nil, err
 		}
 
-		// send request to provider
-		ctx := dataconv.GetThreadContext(thread)
+		// send request to provider, with a total deadline so a stalled response
+		// body can't hang the caller (draw is always blocking).
+		ctx, cancel := context.WithTimeout(dataconv.GetThreadContext(thread), m.requestTimeout())
+		defer cancel()
 		var resp oai.ImageResponse
 		for i := 0; i < retryTimes; i++ {
 			resp, err = cli.CreateImage(ctx, req)
@@ -572,10 +600,17 @@ func (m *Module) genChatFunc() starlark.Callable {
 
 		// Handle request based on streaming mode
 		if params.stream {
+			// Streaming keeps no total deadline (see newHTTPClient) so a long
+			// stream isn't truncated; the transport still bounds the initial hang.
 			return m.handleStreamingRequest(ctx, cli, req, model, thread, params)
 		}
 
-		return m.handleBlockingRequest(ctx, cli, req, params)
+		// A blocking request gets a total deadline so a provider that sends
+		// headers then stalls the body can't hang the caller indefinitely
+		// (ResponseHeaderTimeout alone does not cover the body read).
+		bctx, cancel := context.WithTimeout(ctx, m.requestTimeout())
+		defer cancel()
+		return m.handleBlockingRequest(bctx, cli, req, params)
 	})
 }
 
@@ -1009,46 +1044,96 @@ func (m *Module) getClient(model string) (*oai.Client, error) {
 		return m.cli, nil
 	}
 
-	provider := m.ext.GetString(configKeyProvider, ProviderOpenAI)
 	apiKey := m.ext.GetString(configKeyAPIKey)
 	if apiKey == "" {
 		return nil, fmt.Errorf("%s is not set", configKeyAPIKey)
 	}
 
+	cfg, err := m.buildProviderConfig(apiKey, model)
+	if err != nil {
+		return nil, err
+	}
+
+	// Bound the connection and time-to-first-response so a slow or hanging
+	// endpoint can't stall the caller forever. The go-openai default config
+	// carries no timeout at all.
+	cfg.HTTPClient = m.newHTTPClient()
+
+	// create a new client
+	return oai.NewClientWithConfig(cfg), nil
+}
+
+// newHTTPClient builds an HTTP client that bounds how long a request may hang
+// (dial, TLS handshake, and time-to-first-response-header) at request_timeout —
+// but deliberately sets NO total http.Client.Timeout, because that is a hard cap
+// on the whole response body and would truncate a legitimately long streaming
+// chat (stream=True) mid-stream. Bounding the response-header time still stops an
+// unresponsive endpoint from stalling the caller indefinitely.
+func (m *Module) newHTTPClient() *http.Client {
+	t := m.requestTimeout()
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: t}).DialContext,
+			TLSHandshakeTimeout:   t,
+			ResponseHeaderTimeout: t,
+			ExpectContinueTimeout: 1 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
+}
+
+// buildProviderConfig assembles the go-openai client config for the configured
+// provider (openai / azure / anthropic), reading provider / endpoint /
+// api_version from config. These are script-settable by design (the module's
+// self-config model), so see the docs/API.md trust model before injecting a host
+// key for untrusted scripts.
+func (m *Module) buildProviderConfig(apiKey, model string) (oai.ClientConfig, error) {
+	provider := m.ext.GetString(configKeyProvider, ProviderOpenAI)
 	endpointURL := m.ext.GetString(configKeyEndpointURL, "")
 	apiVersion := m.ext.GetString(configKeyAPIVersion, defaultAPIVersion)
 
-	// create client configuration
-	var cfg oai.ClientConfig
 	switch strings.ToLower(provider) {
 	case ProviderAzure: // Azure OpenAI services
 		if endpointURL == "" {
-			return nil, fmt.Errorf("%s is required for Azure provider", configKeyEndpointURL) // endpointURL is required for Azure
+			return oai.ClientConfig{}, fmt.Errorf("%s is required for Azure provider", configKeyEndpointURL)
 		}
-		cfg = oai.DefaultAzureConfig(apiKey, endpointURL)
+		cfg := oai.DefaultAzureConfig(apiKey, endpointURL)
 		cfg.APIVersion = apiVersion
-		cfg.AzureModelMapperFunc = func(_ string) string {
-			return model
-		}
+		cfg.AzureModelMapperFunc = func(_ string) string { return model }
+		return cfg, nil
 	case ProviderAnthropic: // Anthropic Claude API
-		cfg = oai.DefaultConfig(apiKey)
+		cfg := oai.DefaultConfig(apiKey)
 		cfg.APIVersion = apiVersion
 		if endpointURL != "" {
 			cfg.BaseURL = endpointURL
 		} else {
 			cfg.BaseURL = "https://api.anthropic.com"
 		}
+		return cfg, nil
 	case ProviderOpenAI, empty: // Vanilla OpenAI services
-		cfg = oai.DefaultConfig(apiKey)
+		cfg := oai.DefaultConfig(apiKey)
 		if endpointURL != "" {
 			cfg.BaseURL = endpointURL
 		}
+		return cfg, nil
 	default:
-		return nil, fmt.Errorf("unsupported provider: %s", provider)
+		return oai.ClientConfig{}, fmt.Errorf("unsupported provider: %s", provider)
 	}
+}
 
-	// create a new client
-	return oai.NewClientWithConfig(cfg), nil
+// requestTimeout resolves the per-request HTTP timeout, falling back to the
+// default when unset or non-positive (so the bound is never disabled). Capped so
+// an absurd configured value can't overflow the nanosecond duration.
+func (m *Module) requestTimeout() time.Duration {
+	secs := m.ext.GetInt(configKeyRequestTimeout, defaultRequestTimeout)
+	if secs <= 0 {
+		secs = defaultRequestTimeout
+	}
+	if secs > maxRequestTimeoutSeconds {
+		secs = maxRequestTimeoutSeconds
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // getModel retrieves the model name.

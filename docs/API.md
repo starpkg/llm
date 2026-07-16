@@ -467,6 +467,7 @@ builtin. The key can be set from a script but never read back.
 | `openai_dalle_model` | `get_openai_dalle_model` | `set_openai_dalle_model` | string | `LLM_OPENAI_DALLE_MODEL` | `""` | Default model for `draw` |
 | `api_version` | `get_api_version` | `set_api_version` | string | `LLM_API_VERSION` | `2024-02-01` | API version (used by Azure and Anthropic) |
 | `legacy_mode` | `get_legacy_mode` | `set_legacy_mode` | bool | `LLM_LEGACY_MODE` | `true` | Conversion mode for `full_response` objects (see below) |
+| `request_timeout` | `get_request_timeout` | `set_request_timeout` | int | `LLM_REQUEST_TIMEOUT` | `120` | Per-request timeout in seconds. A **blocking** request (chat without `stream`, `draw`) uses it as a total deadline; a **streaming** chat uses it only as a connect + time-to-first-response bound (so a long stream is not truncated). A hanging endpoint can't stall the caller either way. Non-positive falls back to the default (never disabled) |
 
 **Example:**
 
@@ -483,6 +484,38 @@ print(chat(text="Hello!"))
 These accessors are also reachable as module attributes — e.g.
 `llm.set_openai_api_key("sk-...")` — when the module is loaded under its `llm`
 name rather than via `load(...)` of individual symbols.
+
+## Safety / trust model
+
+This module is designed so a **script** can self-configure the remote service —
+it may `set_openai_provider` / `set_openai_endpoint_url` / `set_openai_api_key` to
+point at its own provider (OpenAI, Azure, an Anthropic or OpenAI-compatible
+gateway) and call `chat` / `draw`. That flexibility has two consequences a host
+must understand before running **untrusted** scripts:
+
+- **A host-injected API key travels to the script-chosen endpoint.**
+  `openai_api_key` is secret (write-only; no getter), but a script can still
+  `set_openai_endpoint_url(...)` to any host and then make a request — and the
+  configured key is sent there in the `Authorization` header. So if the host
+  injects a key (via `NewModuleWithConfig` or `LLM_OPENAI_API_KEY`) and runs an
+  untrusted script, that script can exfiltrate the key by pointing the endpoint
+  at a server it controls (and can reach internal addresses — an SSRF vector).
+  **Only inject a host API key for scripts you trust**; for untrusted scripts,
+  let each script provide its own key, or run it behind an egress allowlist. This
+  is the same trust model as `s3` (host-injected credentials + script-chosen
+  endpoint).
+
+- **`image_file` reads arbitrary host files.** `chat(..., image_file="/path")`
+  (and `message(image_file=...)`) reads a host file and sends its bytes to the
+  endpoint. The read is bounded (≤ 64 MiB) so it can't exhaust memory, but the
+  **path is not jailed** — an untrusted script can read any host-readable file
+  and mail it to the endpoint. Enable this module for scripts you trust with host
+  file access, or have scripts pass image bytes they already hold via `image=`
+  instead of a path.
+
+- **Requests are time-bounded.** Each HTTP request uses `request_timeout` seconds
+  (default `120`), so a slow or hanging endpoint cannot stall the caller
+  indefinitely.
 
 ### `legacy_mode` and `full_response`
 
