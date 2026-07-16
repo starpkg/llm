@@ -119,12 +119,20 @@ errors, and examples of every builtin above.
 
 The module's options (`openai_provider`, `openai_endpoint_url`,
 `openai_api_key`, `openai_gpt_model`, `openai_dalle_model`, `api_version`,
-`legacy_mode`) are configured via environment variables (`LLM_*`) or per-option
-`get_<key>` / `set_<key>` accessor builtins, and serve as defaults for `chat` /
-`draw`. `openai_api_key` is secret — it exposes only `set_openai_api_key`, never
-a getter. See the
+`legacy_mode`, `request_timeout`) are configured via environment variables
+(`LLM_*`) or per-option `get_<key>` / `set_<key>` accessor builtins, and serve as
+defaults for `chat` / `draw`. `openai_api_key` is secret — it exposes only
+`set_openai_api_key`, never a getter. `request_timeout` (default `120`s) bounds
+each request (a total deadline for blocking `chat`/`draw`; a connect +
+first-response bound for streaming, so long streams aren't truncated). See the
 [Configuration section of docs/API.md](docs/API.md#configuration) for the full
 option table, defaults, accessors, and the `legacy_mode` behavior.
+
+**Trust model** — a script can point the client at its own provider/endpoint/key,
+so a *host-injected* API key can be sent to a script-chosen endpoint, and
+`image_file` reads arbitrary host files (bounded to 64 MiB). Only inject a host
+key, and only enable host file access, for scripts you trust — see
+[Safety / trust model](docs/API.md#safety--trust-model).
 
 ## License
 
