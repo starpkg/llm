@@ -1243,25 +1243,51 @@ func (m *Module) getModel(key, val string) string {
 
 func hostPolicyOrigin(provider, endpoint string) (string, error) {
 	if endpoint == "" {
-		switch strings.ToLower(provider) {
-		case ProviderOpenAI, empty:
-			endpoint = defaultOpenAIEndpoint
-		case ProviderAnthropic:
-			endpoint = defaultAnthropicEndpoint
-		case ProviderAzure:
-			return "", fmt.Errorf("%s is required for Azure provider", configKeyEndpointURL)
-		default:
-			return "", fmt.Errorf("unsupported provider: %s", provider)
+		var err error
+		endpoint, err = hostPolicyDefaultEndpoint(provider)
+		if err != nil {
+			return "", err
 		}
 	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", fmt.Errorf("%s must be an http(s) URL without credentials, query, or fragment", configKeyEndpointURL)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("%s must use http or https", configKeyEndpointURL)
+	parsed, err := parseHostPolicyURL(endpoint)
+	if err != nil {
+		return "", err
 	}
 	return originKey(parsed), nil
+}
+
+func hostPolicyDefaultEndpoint(provider string) (string, error) {
+	switch strings.ToLower(provider) {
+	case ProviderOpenAI, empty:
+		return defaultOpenAIEndpoint, nil
+	case ProviderAnthropic:
+		return defaultAnthropicEndpoint, nil
+	case ProviderAzure:
+		return "", fmt.Errorf("%s is required for Azure provider", configKeyEndpointURL)
+	default:
+		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+func parseHostPolicyURL(endpoint string) (*url.URL, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be an http(s) URL without credentials, query, or fragment", configKeyEndpointURL)
+	}
+	if parsed.Hostname() == "" || parsed.User != nil {
+		return nil, fmt.Errorf("%s must be an http(s) URL without credentials, query, or fragment", configKeyEndpointURL)
+	}
+	if parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("%s must be an http(s) URL without credentials, query, or fragment", configKeyEndpointURL)
+	}
+	if !isHostPolicyScheme(parsed.Scheme) {
+		return nil, fmt.Errorf("%s must use http or https", configKeyEndpointURL)
+	}
+	return parsed, nil
+}
+
+func isHostPolicyScheme(scheme string) bool {
+	return scheme == "http" || scheme == "https"
 }
 
 func originKey(parsed *url.URL) string {
