@@ -11,10 +11,10 @@
 //   - request_timeout: Per-request timeout in seconds (default: 120). Total
 //     deadline for blocking chat/draw; connect+first-response bound for streaming
 //
-// Trust model: a script may set the provider/endpoint/key itself, so a
-// host-injected api_key can be sent to a script-chosen endpoint (only inject a
-// host key for trusted scripts), and image_file reads arbitrary host files
-// (bounded to 64 MiB) — see docs/API.md "Safety / trust model".
+// The historical constructors let a script set the provider, endpoint, and
+// key. Hosts running untrusted scripts can opt into NewModuleWithHostPolicy to
+// bind those values, reject cross-origin redirects, and optionally jail
+// image_file reads. See docs/API.md "Safety / trust model".
 //
 // The chat function supports both blocking and streaming modes:
 //   - In blocking mode (default), the function waits for the complete response
@@ -50,6 +50,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,11 @@ const (
 	configKeyAPIVersion     = "api_version"
 	configKeyLegacyMode     = "legacy_mode"
 	configKeyRequestTimeout = "request_timeout"
+)
+
+const (
+	defaultOpenAIEndpoint    = "https://api.openai.com/v1"
+	defaultAnthropicEndpoint = "https://api.anthropic.com"
 )
 
 // defaultRequestTimeout bounds how long a request may hang so a slow or hanging
@@ -128,9 +134,32 @@ func clampStreamChoices(n int) int {
 
 // Module wraps the ConfigurableModule with specific functionality for calling OpenAI models.
 type Module struct {
-	cfgMod *base.ConfigurableModule
-	ext    *base.ConfigurableModuleExt
-	cli    *oai.Client
+	cfgMod      *base.ConfigurableModule
+	ext         *base.ConfigurableModuleExt
+	cli         *oai.Client
+	hostPolicy  *hostPolicy
+	policyError error
+}
+
+// HostPolicy binds host-provided credentials and file access to a fixed
+// endpoint. It is opt-in through NewModuleWithHostPolicy; NewModule and
+// NewModuleWithConfig retain their historical self-configuring behavior.
+//
+// Provider, EndpointURL, and APIKey are host-only in the policy constructor, so
+// a script cannot redirect a host credential. Redirects must stay on the same
+// scheme, host, and port as EndpointURL. FileRoot is resolved once when the
+// module is constructed; image_file paths are anchored to it and symlinks that
+// leave it are rejected. An empty FileRoot denies image_file inputs.
+type HostPolicy struct {
+	Provider    string
+	EndpointURL string
+	APIKey      string
+	FileRoot    string
+}
+
+type hostPolicy struct {
+	endpointOrigin string
+	fileRoot       string
 }
 
 // chatParams contains all the parameters required for a chat completion request
@@ -214,6 +243,42 @@ func NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleMo
 	)
 }
 
+// NewModuleWithHostPolicy creates a module for a host-controlled endpoint and
+// credential. The provider, endpoint, and API key cannot be changed by
+// Starlark. Models and ordinary request options remain script-settable, which
+// preserves the module's small self-configuring surface without exposing the
+// host credential to a script-selected endpoint.
+//
+// FileRoot enables image_file only beneath the supplied directory. Relative
+// paths are resolved from that root. Leave it empty to deny host file reads.
+// Invalid policy values are reported when the module loader or a request is
+// used, matching the existing deferred configuration-validation contract.
+func NewModuleWithHostPolicy(policy HostPolicy) *Module {
+	provider := policy.Provider
+	if provider == "" {
+		provider = ProviderOpenAI
+	}
+	providerOpt := genConfigOption(configKeyProvider, "Host-controlled provider type", provider).WithValue(provider).SetHostOnly(true)
+	endpointOpt := genConfigOption(configKeyEndpointURL, "Host-controlled API endpoint URL", policy.EndpointURL).WithValue(policy.EndpointURL).SetHostOnly(true)
+	apiKeyOpt := genConfigOption(configKeyAPIKey, "Host-controlled API key", policy.APIKey).WithValue(policy.APIKey).SetSecret(true).SetHostOnly(true)
+	module := newModuleWithOptions(
+		providerOpt,
+		endpointOpt,
+		apiKeyOpt,
+		genConfigOption(configKeyGPTModel, "GPT model name", empty),
+		genConfigOption(configKeyDALLEModel, "DALL-E model name", empty),
+		genConfigOption(configKeyAPIVersion, "API version", defaultAPIVersion),
+		genConfigOption(configKeyLegacyMode, "Use legacy mode for data conversion", true),
+		genConfigOption(configKeyRequestTimeout, "Per-request timeout in seconds", defaultRequestTimeout),
+	)
+	module.hostPolicy = &hostPolicy{}
+	module.hostPolicy.endpointOrigin, module.policyError = hostPolicyOrigin(provider, policy.EndpointURL)
+	if module.policyError == nil && policy.FileRoot != "" {
+		module.hostPolicy.fileRoot, module.policyError = canonicalFileRoot(policy.FileRoot)
+	}
+	return module
+}
+
 // genConfigOption creates a configuration option with common settings.
 // It sets up the name, description, default value, and environment variable.
 func genConfigOption[T any](name, description string, defaultValue T) *base.ConfigOption[T] {
@@ -246,7 +311,13 @@ func (m *Module) LoadModule() starlet.ModuleLoader {
 		"chat":    m.genChatFunc(),
 		"draw":    m.genDrawFunc(),
 	}
-	return m.cfgMod.LoadModule(ModuleName, additionalFuncs)
+	loader := m.cfgMod.LoadModule(ModuleName, additionalFuncs)
+	return func() (starlark.StringDict, error) {
+		if m.policyError != nil {
+			return nil, fmt.Errorf("llm host policy: %w", m.policyError)
+		}
+		return loader()
+	}
 }
 
 var (
@@ -1039,6 +1110,9 @@ func (m *Module) SetClient(cli *oai.Client) {
 
 // getClient retrieves the OpenAI client for this module.
 func (m *Module) getClient(model string) (*oai.Client, error) {
+	if m.policyError != nil {
+		return nil, fmt.Errorf("llm host policy: %w", m.policyError)
+	}
 	if m.cli != nil {
 		// use the existing client
 		return m.cli, nil
@@ -1071,7 +1145,7 @@ func (m *Module) getClient(model string) (*oai.Client, error) {
 // unresponsive endpoint from stalling the caller indefinitely.
 func (m *Module) newHTTPClient() *http.Client {
 	t := m.requestTimeout()
-	return &http.Client{
+	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			DialContext:           (&net.Dialer{Timeout: t}).DialContext,
@@ -1081,13 +1155,33 @@ func (m *Module) newHTTPClient() *http.Client {
 			IdleConnTimeout:       90 * time.Second,
 		},
 	}
+	if m.hostPolicy != nil {
+		client.CheckRedirect = m.checkRedirect
+	}
+	return client
+}
+
+// checkRedirect keeps a host-bound credential on its configured origin. The
+// default http.Client follows redirects; doing so across origins would make
+// the credential binding depend on the Go toolchain's header-forwarding rules.
+func (m *Module) checkRedirect(req *http.Request, via []*http.Request) error {
+	if m.hostPolicy == nil {
+		return nil
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if req.URL.User != nil || originKey(req.URL) != m.hostPolicy.endpointOrigin {
+		return fmt.Errorf("redirect to origin %q is outside the host policy", originKey(req.URL))
+	}
+	return nil
 }
 
 // buildProviderConfig assembles the go-openai client config for the configured
 // provider (openai / azure / anthropic), reading provider / endpoint /
-// api_version from config. These are script-settable by design (the module's
-// self-config model), so see the docs/API.md trust model before injecting a host
-// key for untrusted scripts.
+// api_version from config. These remain script-settable for the historical
+// self-configuring constructors; NewModuleWithHostPolicy fixes the provider,
+// endpoint, and key while leaving model and request options configurable.
 func (m *Module) buildProviderConfig(apiKey, model string) (oai.ClientConfig, error) {
 	provider := m.ext.GetString(configKeyProvider, ProviderOpenAI)
 	endpointURL := m.ext.GetString(configKeyEndpointURL, "")
@@ -1147,6 +1241,98 @@ func (m *Module) getModel(key, val string) string {
 	return m.ext.GetString(key, "")
 }
 
+func hostPolicyOrigin(provider, endpoint string) (string, error) {
+	if endpoint == "" {
+		switch strings.ToLower(provider) {
+		case ProviderOpenAI, empty:
+			endpoint = defaultOpenAIEndpoint
+		case ProviderAnthropic:
+			endpoint = defaultAnthropicEndpoint
+		case ProviderAzure:
+			return "", fmt.Errorf("%s is required for Azure provider", configKeyEndpointURL)
+		default:
+			return "", fmt.Errorf("unsupported provider: %s", provider)
+		}
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%s must be an http(s) URL without credentials, query, or fragment", configKeyEndpointURL)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("%s must use http or https", configKeyEndpointURL)
+	}
+	return originKey(parsed), nil
+}
+
+func originKey(parsed *url.URL) string {
+	scheme := strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
+}
+
+func canonicalFileRoot(root string) (string, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("file root: %w", err)
+	}
+	realRoot, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("file root: %w", err)
+	}
+	info, err := os.Stat(realRoot)
+	if err != nil {
+		return "", fmt.Errorf("file root: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("file root %q is not a directory", root)
+	}
+	return filepath.Clean(realRoot), nil
+}
+
+func pathWithinRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func (m *Module) resolveImageFile(filePath string) (string, error) {
+	if m.hostPolicy == nil {
+		return filePath, nil
+	}
+	if m.hostPolicy.fileRoot == "" {
+		return "", errors.New("image_file is disabled by the host policy")
+	}
+	candidate := filePath
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(m.hostPolicy.fileRoot, candidate)
+	}
+	realPath, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("image_file: %w", err)
+	}
+	if !pathWithinRoot(m.hostPolicy.fileRoot, realPath) {
+		return "", fmt.Errorf("image_file path %q is outside the host file root", filePath)
+	}
+	info, err := os.Stat(realPath)
+	if err != nil {
+		return "", fmt.Errorf("image_file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("image_file path %q is not a regular file", filePath)
+	}
+	return realPath, nil
+}
+
 // getStringFromDict retrieves a string value from a dictionary and whether the key exists
 func getStringFromDict(d *starlark.Dict, key string) (string, bool) {
 	v, ok, err := d.Get(starlark.String(key))
@@ -1187,6 +1373,14 @@ func imageFileToBase64(filePath string) (string, error) {
 	base64Data := base64.StdEncoding.EncodeToString(fileBuffer)
 	mimeType := mime.TypeByExtension(filepath.Ext(filePath))
 	return fmt.Sprintf("data:%s;base64,%s", mimeType, base64Data), nil
+}
+
+func (m *Module) imageFileToBase64(filePath string) (string, error) {
+	resolved, err := m.resolveImageFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	return imageFileToBase64(resolved)
 }
 
 // imageDataToBase64 converts image data to base64 data.
@@ -1255,7 +1449,7 @@ func (m *Module) messagesToChatMessages(msgs []*starlark.Dict) ([]oai.ChatComple
 			})
 		}
 		if okF { // for image file part, read and convert to mime & base64
-			b64, err := imageFileToBase64(imageFile)
+			b64, err := m.imageFileToBase64(imageFile)
 			if err != nil {
 				return nil, fmt.Errorf("message %d: %w", i+1, err)
 			}
