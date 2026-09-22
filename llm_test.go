@@ -538,6 +538,93 @@ chat(text="hello", model="gpt-x")`)
 		}
 	})
 
+	t.Run("redirect helper keeps the full origin boundary", func(t *testing.T) {
+		m := NewModuleWithHostPolicy(HostPolicy{EndpointURL: "http://EXAMPLE.test/v1", APIKey: "host-key"})
+		request, err := http.NewRequest(http.MethodGet, "http://example.test/next", nil)
+		if err != nil {
+			t.Fatalf("same-origin request: %v", err)
+		}
+		if err := m.checkRedirect(request, nil); err != nil {
+			t.Fatalf("same-origin redirect: %v", err)
+		}
+
+		userRequest, err := http.NewRequest(http.MethodGet, "http://user:pass@example.test/next", nil)
+		if err != nil {
+			t.Fatalf("userinfo request: %v", err)
+		}
+		if err := m.checkRedirect(userRequest, nil); err == nil || !strings.Contains(err.Error(), "outside the host policy") {
+			t.Fatalf("userinfo redirect error = %v, want policy rejection", err)
+		}
+		if err := m.checkRedirect(request, make([]*http.Request, 10)); err == nil || !strings.Contains(err.Error(), "10 redirects") {
+			t.Fatalf("redirect limit error = %v, want 10-redirect rejection", err)
+		}
+		if err := NewModule().checkRedirect(request, nil); err != nil {
+			t.Fatalf("legacy redirect helper: %v", err)
+		}
+	})
+
+	t.Run("endpoint and file-root helper branches", func(t *testing.T) {
+		if got, err := hostPolicyOrigin("Anthropic", ""); err != nil || got != "https://api.anthropic.com:443" {
+			t.Errorf("anthropic default origin = %q (err %v), want HTTPS Anthropic origin", got, err)
+		}
+		for _, tc := range []struct {
+			name     string
+			provider string
+			want     string
+		}{
+			{name: "azure needs endpoint", provider: ProviderAzure, want: "required for Azure"},
+			{name: "unknown provider", provider: "gemini", want: "unsupported provider"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if _, err := hostPolicyOrigin(tc.provider, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("hostPolicyOrigin(%q, empty) = %v, want %q", tc.provider, err, tc.want)
+				}
+			})
+		}
+		if got, err := hostPolicyOrigin(ProviderOpenAI, "http://EXAMPLE.test/path"); err != nil || got != "http://example.test:80" {
+			t.Errorf("HTTP origin = %q (err %v), want normalized port 80", got, err)
+		}
+		for _, endpoint := range []string{"https://example.test?", "://bad"} {
+			if _, err := hostPolicyOrigin(ProviderOpenAI, endpoint); err == nil {
+				t.Errorf("endpoint %q unexpectedly accepted", endpoint)
+			}
+		}
+
+		root := t.TempDir()
+		file := filepath.Join(root, "file.txt")
+		if err := os.WriteFile(file, []byte("file"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		if _, err := canonicalFileRoot(file); err == nil || !strings.Contains(err.Error(), "not a directory") {
+			t.Errorf("file root regular file error = %v, want not-a-directory", err)
+		}
+		if pathWithinRoot(root, root) {
+			t.Error("file root itself should not be accepted as an image file")
+		}
+		if pathWithinRoot(root, filepath.Join(root, "..", "outside")) {
+			t.Error("path outside root should not be accepted")
+		}
+
+		m := NewModuleWithHostPolicy(HostPolicy{EndpointURL: "https://example.test", APIKey: "k", FileRoot: root})
+		if _, err := m.resolveImageFile("missing.txt"); err == nil || !strings.Contains(err.Error(), "image_file") {
+			t.Errorf("missing image error = %v, want image_file error", err)
+		}
+		directory := filepath.Join(root, "directory")
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatalf("make directory: %v", err)
+		}
+		if _, err := m.resolveImageFile(directory); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Errorf("directory image error = %v, want non-regular error", err)
+		}
+		canonicalFile, err := filepath.EvalSymlinks(file)
+		if err != nil {
+			t.Fatalf("canonical file: %v", err)
+		}
+		if got, err := m.resolveImageFile(file); err != nil || got != canonicalFile {
+			t.Errorf("absolute in-root image = %q (err %v), want %q", got, err, canonicalFile)
+		}
+	})
+
 	t.Run("image files stay below file root", func(t *testing.T) {
 		root := t.TempDir()
 		allowedPath := filepath.Join(root, "allowed.png")
@@ -639,6 +726,10 @@ chat(image_file="anything.png", model="gpt-x")`)
 			if _, err := m.LoadModule()(); err == nil || !strings.Contains(err.Error(), "host policy") {
 				t.Errorf("endpoint %q loader error = %v, want host policy error", endpoint, err)
 			}
+		}
+		badClient := NewModuleWithHostPolicy(HostPolicy{Provider: ProviderAzure, APIKey: "k"})
+		if _, err := badClient.getClient("gpt-x"); err == nil || !strings.Contains(err.Error(), "host policy") {
+			t.Errorf("getClient invalid policy error = %v, want host policy error", err)
 		}
 	})
 }
