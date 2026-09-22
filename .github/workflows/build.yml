@@ -27,33 +27,3 @@ jobs:
       footprint: true
       footprint-max-mb: 3
     secrets: inherit
-
-  # Codecov needs a report for the pull request base before it can calculate
-  # codecov/project. The repository had no recent master upload, so seed the
-  # exact base SHA with the same OIDC trust path used by the normal CI job.
-  baseline:
-    if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Check out pull request base
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-      - name: Set up Go 1.19
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: 1.19.x
-      - name: Generate base coverage
-        run: go test -covermode=atomic -coverprofile=coverage-base.txt ./...
-      - name: Upload base coverage
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
-        with:
-          use_oidc: true
-          files: coverage-base.txt
-          disable_search: true
-          override_commit: ${{ github.event.pull_request.base.sha }}
-          override_branch: ${{ github.event.pull_request.base.ref }}
-          fail_ci_if_error: true
