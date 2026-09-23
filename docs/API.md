@@ -454,6 +454,10 @@ An option's value resolves in priority order: an explicit `set_<key>` value, the
 environment variable, then the default. These options serve as defaults used by
 `chat` / `draw` when the corresponding argument is not provided.
 
+The table below describes the historical self-configuring constructors. When
+using `NewModuleWithHostPolicy`, the provider, endpoint, and API-key setters
+are omitted as described in [Host-controlled construction](#host-controlled-construction).
+
 `openai_api_key` is a **secret** option (`SetSecret(true)` in the code), so it
 exposes **only** `set_openai_api_key` — there is **no** `get_openai_api_key`
 builtin. The key can be set from a script but never read back.
@@ -485,13 +489,41 @@ These accessors are also reachable as module attributes — e.g.
 `llm.set_openai_api_key("sk-...")` — when the module is loaded under its `llm`
 name rather than via `load(...)` of individual symbols.
 
+### Host-controlled construction
+
+Go hosts that run untrusted scripts can use
+`NewModuleWithHostPolicy(HostPolicy{...})` instead of the historical
+`NewModule` / `NewModuleWithConfig` constructors:
+
+```go
+mod := llm.NewModuleWithHostPolicy(llm.HostPolicy{
+    Provider:    "openai",
+    EndpointURL: "https://api.openai.com/v1",
+    APIKey:      os.Getenv("OPENAI_API_KEY"),
+    FileRoot:    "/srv/llm-images",
+})
+```
+
+In this mode `Provider`, `EndpointURL`, and `APIKey` are host-only: their
+`set_openai_*` builtins are not exposed, and the API key has no getter. The
+client rejects redirects to a different scheme, host, or port than the policy
+endpoint. `FileRoot` is canonicalized at construction; relative `image_file`
+paths are resolved beneath it and symlinks that leave it are rejected. An empty
+`FileRoot` disables `image_file`. Invalid policy values are returned by the
+module loader. Model selection, API version, legacy conversion, and request
+timeout remain script-configurable so the existing request surface stays small.
+The file check is a path-level guard; a host that must resist concurrent
+filesystem replacement still needs an OS-level sandbox or an immutable fixture
+directory.
+
 ## Safety / trust model
 
-This module is designed so a **script** can self-configure the remote service —
-it may `set_openai_provider` / `set_openai_endpoint_url` / `set_openai_api_key` to
-point at its own provider (OpenAI, Azure, an Anthropic or OpenAI-compatible
-gateway) and call `chat` / `draw`. That flexibility has two consequences a host
-must understand before running **untrusted** scripts:
+The historical `NewModule` and `NewModuleWithConfig` constructors are designed
+so a **script** can self-configure the remote service — it may
+`set_openai_provider` / `set_openai_endpoint_url` / `set_openai_api_key` to point
+at its own provider (OpenAI, Azure, an Anthropic or OpenAI-compatible gateway)
+and call `chat` / `draw`. That flexibility has two consequences a host must
+understand before running **untrusted** scripts:
 
 - **A host-injected API key travels to the script-chosen endpoint.**
   `openai_api_key` is secret (write-only; no getter), but a script can still
@@ -500,18 +532,19 @@ must understand before running **untrusted** scripts:
   injects a key (via `NewModuleWithConfig` or `LLM_OPENAI_API_KEY`) and runs an
   untrusted script, that script can exfiltrate the key by pointing the endpoint
   at a server it controls (and can reach internal addresses — an SSRF vector).
-  **Only inject a host API key for scripts you trust**; for untrusted scripts,
-  let each script provide its own key, or run it behind an egress allowlist. This
-  is the same trust model as `s3` (host-injected credentials + script-chosen
-  endpoint).
+  **Only inject a host API key for scripts you trust** when using these
+  historical constructors; for untrusted scripts, use
+  `NewModuleWithHostPolicy` or run the self-configuring mode behind an egress
+  allowlist. The policy constructor fixes the endpoint and rejects cross-origin
+  redirects before a request can follow them.
 
-- **`image_file` reads arbitrary host files.** `chat(..., image_file="/path")`
+- **`image_file` reads arbitrary host files in the historical mode.** `chat(..., image_file="/path")`
   (and `message(image_file=...)`) reads a host file and sends its bytes to the
   endpoint. The read is bounded (≤ 64 MiB) so it can't exhaust memory, but the
   **path is not jailed** — an untrusted script can read any host-readable file
-  and mail it to the endpoint. Enable this module for scripts you trust with host
-  file access, or have scripts pass image bytes they already hold via `image=`
-  instead of a path.
+  and mail it to the endpoint. Use `NewModuleWithHostPolicy` with a non-empty
+  `FileRoot` to jail paths, or leave `FileRoot` empty to disable file reads;
+  scripts can also pass image bytes they already hold via `image=`.
 
 - **Requests are time-bounded.** Each HTTP request uses `request_timeout` seconds
   (default `120`), so a slow or hanging endpoint cannot stall the caller

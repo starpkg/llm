@@ -47,9 +47,20 @@ go get github.com/starpkg/llm
 ## Quick Start
 
 Wire the module into a Starlet interpreter, then `load("llm", …)` from a script.
-The Go layer provides two constructors: `NewModule()` (empty config) and
+The Go layer provides the historical `NewModule()` (empty config) and
 `NewModuleWithConfig(serviceProvider, endpointURL, apiKey, gptModel, dalleModel, apiVersion)`
-(preset config).
+(preset config) constructors. For a host that runs untrusted scripts, use
+`NewModuleWithHostPolicy` to bind credentials and the endpoint while keeping
+model selection in Starlark:
+
+```go
+mod := llm.NewModuleWithHostPolicy(llm.HostPolicy{
+    Provider:    "openai",
+    EndpointURL: "https://api.openai.com/v1",
+    APIKey:      os.Getenv("OPENAI_API_KEY"),
+    FileRoot:    "/srv/llm-images", // empty disables image_file
+})
+```
 
 ```go
 package main
@@ -128,11 +139,12 @@ first-response bound for streaming, so long streams aren't truncated). See the
 [Configuration section of docs/API.md](docs/API.md#configuration) for the full
 option table, defaults, accessors, and the `legacy_mode` behavior.
 
-**Trust model** — a script can point the client at its own provider/endpoint/key,
-so a *host-injected* API key can be sent to a script-chosen endpoint, and
-`image_file` reads arbitrary host files (bounded to 64 MiB). Only inject a host
-key, and only enable host file access, for scripts you trust — see
-[Safety / trust model](docs/API.md#safety--trust-model).
+**Trust model** — `NewModule()` and `NewModuleWithConfig` retain the historical
+self-configuring behavior: a script can choose its provider/endpoint/key, and
+`image_file` can read any host-readable file (bounded to 64 MiB). For untrusted
+scripts, `NewModuleWithHostPolicy` makes the provider, endpoint, and key
+host-only, rejects cross-origin redirects, and confines `image_file` to
+`FileRoot` (an empty root disables it). See [Safety / trust model](docs/API.md#safety--trust-model).
 
 ## License
 

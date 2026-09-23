@@ -241,6 +241,7 @@ func TestKwargsConversion(t *testing.T) {
 //   - newTestServerModule        : loopback test-server helper
 //   - runModuleScript / assert   : script runner + injected assert/fail globals
 //   - TestModuleConstruction     : NewModule / NewModuleWithConfig / defaulting
+//   - TestHostPolicy             : host-only credentials, origin, and file root
 //   - TestGetClientSelection     : provider routing + error branches
 //   - TestModelAndDictHelpers    : getModel / getStringFromDict
 //   - TestKwargsConversionErrors : convertStarlarkDictToGoMap error paths
@@ -407,6 +408,330 @@ func TestModuleConstruction(t *testing.T) {
 	if got != inj {
 		t.Errorf("getClient did not return the injected client")
 	}
+}
+
+func TestHostPolicy(t *testing.T) {
+	t.Run("host-only configuration", func(t *testing.T) {
+		m := NewModuleWithHostPolicy(HostPolicy{
+			Provider:    ProviderOpenAI,
+			EndpointURL: "https://api.example.test/v1",
+			APIKey:      "host-key",
+		})
+		sd, err := m.LoadModule()()
+		if err != nil {
+			t.Fatalf("load host policy module: %v", err)
+		}
+		moduleData, ok := sd[ModuleName].(*starlarkstruct.Module)
+		if !ok {
+			t.Fatalf("module data = %T, want *starlarkstruct.Module", sd[ModuleName])
+		}
+		for _, name := range []string{"set_openai_provider", "set_openai_endpoint_url", "set_openai_api_key"} {
+			if _, ok := moduleData.Members[name]; ok {
+				t.Errorf("host policy exposed %s", name)
+			}
+		}
+		if _, ok := moduleData.Members["set_openai_gpt_model"]; !ok {
+			t.Error("host policy removed script-settable model configuration")
+		}
+		if _, ok := moduleData.Members["get_openai_api_key"]; ok {
+			t.Error("host policy exposed the secret API key getter")
+		}
+
+		defaultModule := NewModuleWithHostPolicy(HostPolicy{APIKey: "host-key"})
+		if defaultModule.hostPolicy.endpointOrigin != "https://api.openai.com:443" {
+			t.Errorf("default endpoint origin = %q, want OpenAI origin", defaultModule.hostPolicy.endpointOrigin)
+		}
+	})
+
+	t.Run("credential stays on configured origin", func(t *testing.T) {
+		auth := make(chan string, 1)
+		trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth <- r.Header.Get("Authorization")
+			writeJSON(w, oai.ChatCompletionResponse{
+				Choices: []oai.ChatCompletionChoice{{Message: oai.ChatCompletionMessage{Role: "assistant", Content: "ok"}}},
+			})
+		}))
+		defer trusted.Close()
+
+		m := NewModuleWithHostPolicy(HostPolicy{
+			EndpointURL: trusted.URL,
+			APIKey:      "host-key",
+		})
+		if err := runModuleScript(t, m, `load("llm", "chat")
+assert.eq(chat(text="hello", model="gpt-x"), "ok")`); err != nil {
+			t.Fatalf("host policy request failed: %v", err)
+		}
+		select {
+		case got := <-auth:
+			if got != "Bearer host-key" {
+				t.Errorf("authorization = %q, want host credential", got)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("trusted endpoint did not receive a request")
+		}
+
+		// The host-bound endpoint cannot be replaced by script configuration.
+		err := runModuleScript(t, m, `load("llm", "set_openai_endpoint_url")`)
+		if err == nil || !strings.Contains(err.Error(), "set_openai_endpoint_url") {
+			t.Fatalf("endpoint setter should be unavailable, got %v", err)
+		}
+	})
+
+	t.Run("draw and stream use the policy client", func(t *testing.T) {
+		auth := make(chan string, 2)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth <- r.Header.Get("Authorization")
+			if strings.HasSuffix(r.URL.Path, "/images/generations") {
+				writeRaw(w, `{"data":[{"url":"https://img.example.test/a.png"}]}`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			writeRaw(w, "data: {\"id\":\"s\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		}))
+		defer server.Close()
+		m := NewModuleWithHostPolicy(HostPolicy{EndpointURL: server.URL, APIKey: "host-key"})
+		if err := runModuleScript(t, m, `load("llm", "draw")
+assert.eq(draw(prompt="cat", model="dall-e-3"), "https://img.example.test/a.png")`); err != nil {
+			t.Fatalf("host policy draw failed: %v", err)
+		}
+		if err := runModuleScript(t, m, `load("llm", "chat")
+assert.eq(chat(text="hello", model="gpt-x", stream=True), "ok")`); err != nil {
+			t.Fatalf("host policy stream failed: %v", err)
+		}
+		for i := 0; i < 2; i++ {
+			select {
+			case got := <-auth:
+				if got != "Bearer host-key" {
+					t.Errorf("request %d authorization = %q, want host credential", i+1, got)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("request %d did not reach the policy endpoint", i+1)
+			}
+		}
+	})
+
+	t.Run("cross-origin redirects are rejected", func(t *testing.T) {
+		hit := make(chan struct{}, 1)
+		sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hit <- struct{}{}
+			writeJSON(w, oai.ChatCompletionResponse{
+				Choices: []oai.ChatCompletionChoice{{Message: oai.ChatCompletionMessage{Role: "assistant", Content: "unexpected"}}},
+			})
+		}))
+		defer sink.Close()
+		trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", sink.URL)
+			w.WriteHeader(http.StatusFound)
+		}))
+		defer trusted.Close()
+
+		m := NewModuleWithHostPolicy(HostPolicy{EndpointURL: trusted.URL, APIKey: "host-key"})
+		err := runModuleScript(t, m, `load("llm", "chat")
+chat(text="hello", model="gpt-x")`)
+		if err == nil || !strings.Contains(err.Error(), "redirect") {
+			t.Fatalf("cross-origin redirect should fail, got %v", err)
+		}
+		select {
+		case <-hit:
+			t.Fatal("cross-origin redirect reached the sink")
+		default:
+		}
+	})
+
+	t.Run("redirect helper keeps the full origin boundary", func(t *testing.T) {
+		m := NewModuleWithHostPolicy(HostPolicy{EndpointURL: "http://EXAMPLE.test/v1", APIKey: "host-key"})
+		request, err := http.NewRequest(http.MethodGet, "http://example.test/next", nil)
+		if err != nil {
+			t.Fatalf("same-origin request: %v", err)
+		}
+		if err := m.checkRedirect(request, nil); err != nil {
+			t.Fatalf("same-origin redirect: %v", err)
+		}
+
+		userRequest, err := http.NewRequest(http.MethodGet, "http://user:pass@example.test/next", nil)
+		if err != nil {
+			t.Fatalf("userinfo request: %v", err)
+		}
+		if err := m.checkRedirect(userRequest, nil); err == nil || !strings.Contains(err.Error(), "outside the host policy") {
+			t.Fatalf("userinfo redirect error = %v, want policy rejection", err)
+		}
+		if err := m.checkRedirect(request, make([]*http.Request, 10)); err == nil || !strings.Contains(err.Error(), "10 redirects") {
+			t.Fatalf("redirect limit error = %v, want 10-redirect rejection", err)
+		}
+		if err := NewModule().checkRedirect(request, nil); err != nil {
+			t.Fatalf("legacy redirect helper: %v", err)
+		}
+	})
+
+	t.Run("endpoint and file-root helper branches", func(t *testing.T) {
+		if got, err := hostPolicyOrigin("Anthropic", ""); err != nil || got != "https://api.anthropic.com:443" {
+			t.Errorf("anthropic default origin = %q (err %v), want HTTPS Anthropic origin", got, err)
+		}
+		for _, tc := range []struct {
+			name     string
+			provider string
+			want     string
+		}{
+			{name: "azure needs endpoint", provider: ProviderAzure, want: "required for Azure"},
+			{name: "unknown provider", provider: "gemini", want: "unsupported provider"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if _, err := hostPolicyOrigin(tc.provider, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("hostPolicyOrigin(%q, empty) = %v, want %q", tc.provider, err, tc.want)
+				}
+			})
+		}
+		if got, err := hostPolicyOrigin(ProviderOpenAI, "http://EXAMPLE.test/path"); err != nil || got != "http://example.test:80" {
+			t.Errorf("HTTP origin = %q (err %v), want normalized port 80", got, err)
+		}
+		for _, endpoint := range []string{"https://example.test?", "://bad"} {
+			if _, err := hostPolicyOrigin(ProviderOpenAI, endpoint); err == nil {
+				t.Errorf("endpoint %q unexpectedly accepted", endpoint)
+			}
+		}
+
+		root := t.TempDir()
+		file := filepath.Join(root, "file.txt")
+		if err := os.WriteFile(file, []byte("file"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		if _, err := canonicalFileRoot(file); err == nil || !strings.Contains(err.Error(), "not a directory") {
+			t.Errorf("file root regular file error = %v, want not-a-directory", err)
+		}
+		if pathWithinRoot(root, root) {
+			t.Error("file root itself should not be accepted as an image file")
+		}
+		if pathWithinRoot(root, filepath.Join(root, "..", "outside")) {
+			t.Error("path outside root should not be accepted")
+		}
+
+		m := NewModuleWithHostPolicy(HostPolicy{EndpointURL: "https://example.test", APIKey: "k", FileRoot: root})
+		if _, err := m.resolveImageFile("missing.txt"); err == nil || !strings.Contains(err.Error(), "image_file") {
+			t.Errorf("missing image error = %v, want image_file error", err)
+		}
+		directory := filepath.Join(root, "directory")
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatalf("make directory: %v", err)
+		}
+		if _, err := m.resolveImageFile(directory); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Errorf("directory image error = %v, want non-regular error", err)
+		}
+		canonicalFile, err := filepath.EvalSymlinks(file)
+		if err != nil {
+			t.Fatalf("canonical file: %v", err)
+		}
+		if got, err := m.resolveImageFile(file); err != nil || got != canonicalFile {
+			t.Errorf("absolute in-root image = %q (err %v), want %q", got, err, canonicalFile)
+		}
+	})
+
+	t.Run("image files stay below file root", func(t *testing.T) {
+		root := t.TempDir()
+		allowedPath := filepath.Join(root, "allowed.png")
+		if err := os.WriteFile(allowedPath, []byte("allowed-image"), 0o644); err != nil {
+			t.Fatalf("write allowed image: %v", err)
+		}
+		outsideDir := t.TempDir()
+		outsidePath := filepath.Join(outsideDir, "outside.png")
+		if err := os.WriteFile(outsidePath, []byte("outside-image"), 0o644); err != nil {
+			t.Fatalf("write outside image: %v", err)
+		}
+		linkPath := filepath.Join(root, "outside-link.png")
+		if err := os.Symlink(outsidePath, linkPath); err != nil {
+			// Symlink creation may be disabled on Windows; traversal still covers
+			// the portable containment check below.
+			linkPath = ""
+		}
+
+		bodies := make(chan []byte, 3)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			if err == nil {
+				bodies <- body
+			}
+			writeJSON(w, oai.ChatCompletionResponse{
+				Choices: []oai.ChatCompletionChoice{{Message: oai.ChatCompletionMessage{Role: "assistant", Content: "ok"}}},
+			})
+		}))
+		defer server.Close()
+		m := NewModuleWithHostPolicy(HostPolicy{EndpointURL: server.URL, APIKey: "host-key", FileRoot: root})
+
+		allowedScripts := []string{
+			`load("llm", "chat")
+assert.eq(chat(image_file="allowed.png", model="gpt-x"), "ok")`,
+			`load("llm", "message", "chat")
+assert.eq(chat(messages=[message(image_file="allowed.png")], model="gpt-x"), "ok")`,
+			`load("llm", "chat")
+assert.eq(chat(messages=[{"role": "user", "image_file": "allowed.png"}], model="gpt-x"), "ok")`,
+			fmt.Sprintf(`load("llm", "chat")
+assert.eq(chat(image_file=%q, model="gpt-x"), "ok")`, allowedPath),
+		}
+		for i, script := range allowedScripts {
+			if err := runModuleScript(t, m, script); err != nil {
+				t.Fatalf("allowed image form %d failed: %v", i+1, err)
+			}
+			select {
+			case body := <-bodies:
+				if !bytes.Contains(body, []byte("YWxsb3dlZC1pbWFnZQ==")) {
+					t.Errorf("image form %d did not contain allowed image data: %s", i+1, body)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("allowed image form %d did not reach endpoint", i+1)
+			}
+		}
+
+		outsideScripts := []string{
+			fmt.Sprintf(`load("llm", "chat")
+chat(image_file=%q, model="gpt-x")`, outsidePath),
+			fmt.Sprintf(`load("llm", "message", "chat")
+chat(messages=[message(image_file=%q)], model="gpt-x")`, outsidePath),
+			fmt.Sprintf(`load("llm", "chat")
+chat(messages=[{"role": "user", "image_file": %q}], model="gpt-x")`, outsidePath),
+			fmt.Sprintf(`load("llm", "chat")
+chat(messages=[{"role": "user", "image_file": %q}], model="gpt-x")`, filepath.Join("..", filepath.Base(outsideDir), filepath.Base(outsidePath))),
+		}
+		for i, script := range outsideScripts {
+			err := runModuleScript(t, m, script)
+			if err == nil || !strings.Contains(err.Error(), "outside the host file root") {
+				t.Errorf("outside image form %d: error = %v, want root violation", i+1, err)
+			}
+		}
+		if linkPath != "" {
+			err := runModuleScript(t, m, fmt.Sprintf(`load("llm", "chat")
+chat(messages=[{"role": "user", "image_file": %q}], model="gpt-x")`, linkPath))
+			if err == nil || !strings.Contains(err.Error(), "outside the host file root") {
+				t.Errorf("symlink image: error = %v, want root violation", err)
+			}
+		}
+
+		noFiles := NewModuleWithHostPolicy(HostPolicy{EndpointURL: server.URL, APIKey: "host-key"})
+		err := runModuleScript(t, noFiles, `load("llm", "chat")
+chat(image_file="anything.png", model="gpt-x")`)
+		if err == nil || !strings.Contains(err.Error(), "image_file is disabled") {
+			t.Errorf("empty file root error = %v, want disabled image_file", err)
+		}
+	})
+
+	t.Run("invalid policy is reported without panic", func(t *testing.T) {
+		badEndpoint := NewModuleWithHostPolicy(HostPolicy{EndpointURL: "file:///tmp/llm", APIKey: "k"})
+		if _, err := badEndpoint.LoadModule()(); err == nil || !strings.Contains(err.Error(), "host policy") {
+			t.Errorf("bad endpoint loader error = %v, want host policy error", err)
+		}
+		badRoot := NewModuleWithHostPolicy(HostPolicy{EndpointURL: "https://api.example.test", APIKey: "k", FileRoot: filepath.Join(t.TempDir(), "missing")})
+		if _, err := badRoot.LoadModule()(); err == nil || !strings.Contains(err.Error(), "host policy") {
+			t.Errorf("bad file root loader error = %v, want host policy error", err)
+		}
+		for _, endpoint := range []string{"https://user:pass@example.test/v1", "https://api.example.test/v1?token=secret", "ftp://api.example.test/v1"} {
+			m := NewModuleWithHostPolicy(HostPolicy{EndpointURL: endpoint, APIKey: "k"})
+			if _, err := m.LoadModule()(); err == nil || !strings.Contains(err.Error(), "host policy") {
+				t.Errorf("endpoint %q loader error = %v, want host policy error", endpoint, err)
+			}
+		}
+		badClient := NewModuleWithHostPolicy(HostPolicy{Provider: ProviderAzure, APIKey: "k"})
+		if _, err := badClient.getClient("gpt-x"); err == nil || !strings.Contains(err.Error(), "host policy") {
+			t.Errorf("getClient invalid policy error = %v, want host policy error", err)
+		}
+	})
 }
 
 func TestGetClientSelection(t *testing.T) {
