@@ -37,115 +37,56 @@ func TestStarlarkScripts(t *testing.T) {
 	base.RunStarlarkTests(t, ModuleName, moduleFactory, extraModules, "")
 }
 
+// TestKwargsParameter verifies argument parsing through a local HTTP round-trip.
 func TestKwargsParameter(t *testing.T) {
-	// Create a new module
-	module := NewModule()
-	moduleLoader := module.LoadModule()
-
-	// Test script that verifies kwargs parameter parsing
-	script := `
-load("llm", "set_openai_endpoint_url", "set_openai_api_key", "message", "chat")
-
-# Configure with test credentials
-set_openai_endpoint_url("https://api.openai.com/v1")
-set_openai_api_key("test-key")
-
-def test_kwargs_parsing():
-    """Test that kwargs parameter can be parsed correctly"""
-    
-    # Test basic kwargs - should parse without error even if API call fails
-    resp = chat(
-        text="Hello",
-        model="gpt-3.5-turbo",
-        max_tokens=10,
-        kwargs={"enable_thinking": True},
-        allow_error=True
-    )
-    print("basic_kwargs_ok")
-    
-    # Test multiple kwargs with different types
-    resp = chat(
-        text="Hello",
-        model="gpt-3.5-turbo", 
-        max_tokens=10,
-        kwargs={
-            "enable_thinking": False,
-            "custom_param": "value",
-            "number": 42,
-            "ratio": 0.5,
-            "list_param": ["a", "b"]
-        },
-        allow_error=True
-    )
-    print("multiple_kwargs_ok")
-    
-    # Test empty kwargs
-    resp = chat(
-        text="Hello",
-        model="gpt-3.5-turbo",
-        max_tokens=10,
-        kwargs={},
-        allow_error=True
-    )
-    print("empty_kwargs_ok")
-    
-    # Test without kwargs parameter
-    resp = chat(
-        text="Hello",
-        model="gpt-3.5-turbo",
-        max_tokens=10,
-        allow_error=True
-    )
-    print("no_kwargs_ok")
-
-test_kwargs_parsing()
-`
-
-	// Create a starlet machine with print capture
-	env := starlet.NewDefault()
-	env.SetScriptContent([]byte(script))
-
-	// Capture print output
-	var printOutput strings.Builder
-	env.SetPrintFunc(func(_ *starlark.Thread, msg string) {
-		printOutput.WriteString(msg)
-		printOutput.WriteString("\n")
-	})
-
-	// Register our module
-	loaders := make(map[string]starlet.ModuleLoader)
-	loaders["llm"] = moduleLoader
-	env.SetLazyloadModules(loaders)
-
-	// Run the script
-	_, err := env.Run()
-	if err != nil {
-		t.Fatalf("Failed to run script: %v", err)
+	cases := []struct {
+		name   string
+		kwargs string
+		want   string
+	}{
+		{"basic", `, kwargs={"enable_thinking": True}`, `{"enable_thinking":true}`},
+		{"mixed", `, kwargs={"enable_thinking": False, "custom_param": "value", "number": 42, "ratio": 0.5, "list_param": ["a", "b"]}`, `{"custom_param":"value","enable_thinking":false,"list_param":["a","b"],"number":42,"ratio":0.5}`},
+		{"empty", `, kwargs={}`, `null`},
+		{"omitted", ``, `null`},
 	}
-
-	// Check the output
-	output := printOutput.String()
-
-	// All kwargs tests should succeed in parsing (even if API calls fail)
-	if !strings.Contains(output, "basic_kwargs_ok") {
-		t.Errorf("Basic kwargs parsing failed. Output: %s", output)
-	}
-
-	if !strings.Contains(output, "multiple_kwargs_ok") {
-		t.Errorf("Multiple kwargs parsing failed. Output: %s", output)
-	}
-
-	if !strings.Contains(output, "empty_kwargs_ok") {
-		t.Errorf("Empty kwargs parsing failed. Output: %s", output)
-	}
-
-	if !strings.Contains(output, "no_kwargs_ok") {
-		t.Errorf("No kwargs parsing failed. Output: %s", output)
-	}
-
-	// Check that there are no parsing errors
-	if strings.Contains(output, "_error:") {
-		t.Errorf("Kwargs parsing had errors. Output: %s", output)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := make(chan oai.ChatCompletionRequest, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req oai.ChatCompletionRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Errorf("decode request: %v", err)
+					http.Error(w, "bad request", http.StatusBadRequest)
+					return
+				}
+				requests <- req
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+			}))
+			defer srv.Close()
+			script := fmt.Sprintf(`
+load("llm", "set_openai_provider", "set_openai_endpoint_url", "set_openai_api_key", "chat")
+set_openai_provider("openai")
+set_openai_endpoint_url(%q)
+set_openai_api_key("fixture-key")
+assert.eq(chat(text="Hello", model="fixture-model", max_tokens=10%s), "ok")
+`, srv.URL, tc.kwargs)
+			if err := runModuleScript(t, NewModule(), script); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case req := <-requests:
+				got, err := json.Marshal(req.ChatTemplateKwargs)
+				if err != nil || string(got) != tc.want {
+					t.Errorf("kwargs = %s (%v), want %s", got, err, tc.want)
+				}
+				if req.Model != "fixture-model" || req.MaxTokens != 10 || len(req.Messages) != 1 || req.Messages[0].Content != "Hello" {
+					t.Errorf("unexpected chat request: %+v", req)
+				}
+			default:
+				t.Error("chat returned without a local HTTP request")
+			}
+		})
 	}
 }
 

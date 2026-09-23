@@ -28,7 +28,7 @@ go run github.com/1set/meta/doccov@master . # doc-coverage gate (exit 0 = every 
 docker run --rm -v "$PWD":/src -v "$HOME/go/pkg/mod":/go/pkg/mod -w /src golang:1.19 go test -race -count=1 ./...
 ```
 
-Live API tests need real credentials and a reachable endpoint; they are not part of the unit suite. Integration scripts under `../test/llm/*.star` live in the **private `starpkg/test` repo** and auto-skip when that directory is absent (e.g. in CI). The in-repo `TestKwargsParameter` only exercises *parameter parsing* with `allow_error=True`, so it does not need a live API.
+Live API tests need real credentials and a reachable endpoint; they are not part of the unit suite. Integration scripts under `../test/llm/*.star` live in the **private `starpkg/test` repo** and auto-skip when that directory is absent (e.g. in CI). The in-repo `TestKwargsParameter` exercises parameter parsing and serialized request fields against a local `httptest` server, with successful responses asserted. It does not contact a live API.
 
 ## Architecture (the part that spans files)
 
@@ -57,7 +57,7 @@ This module talks to a paid, rate-limited, occasionally-failing network service,
 
 ## Test organization
 
-Group by functional goal — **do not add one `*_test.go` per fix.** `llm_test.go` is the home: `TestStarlarkScripts` (the `../test/llm` integration harness via `base.RunStarlarkTests`, auto-skips when absent), `TestKwargsParameter` (kwargs parsing end-to-end with `allow_error=True`, no live API), and `TestKwargsConversion` (the `convertStarlarkDictToGoMap` unit). Add a new test as a **section here**, not a new file. Tests are table/example-driven; no third-party test framework. Anything that needs a live API key or network goes in the private `starpkg/test` repo as a `../test/llm/*.star` script, not in this repo's unit suite.
+Group by functional goal — **do not add one `*_test.go` per fix.** `llm_test.go` is the home: `TestStarlarkScripts` (the `../test/llm` integration harness via `base.RunStarlarkTests`, auto-skips when absent), `TestKwargsParameter` (kwargs parsing and HTTP payload end-to-end against a local mock, no live API), and `TestKwargsConversion` (the `convertStarlarkDictToGoMap` unit). Add a new test as a **section here**, not a new file. Tests are table/example-driven; no third-party test framework. Anything that needs a live API key or network goes in the private `starpkg/test` repo as a `../test/llm/*.star` script, not in this repo's unit suite.
 
 ## Documentation
 
