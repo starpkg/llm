@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`starpkg/llm` is an **L4 domain module** of the Star\* ecosystem: it exposes large-language-model and image-generation services to Starlark scripts. A script imports the module, optionally sets credentials/model, and calls `chat` (text/multimodal completions) or `draw` (image generation), with Go data marshalled to and from Starlark values.
+`starpkg/llm` is an **L3 domain module** of the Star\* ecosystem: it exposes large-language-model and image-generation services to Starlark scripts. A script imports the module, optionally sets credentials/model, and calls `chat` (text/multimodal completions) or `draw` (image generation), with Go data marshalled to and from Starlark values.
 
 Per the starpkg positioning — *"support for necessary LOCAL operations + simple abstractions over common ONLINE services, for ease of use"* — `llm` sits squarely on the **online-service side**: it is a thin, ergonomic wrapper over a remote SaaS API. There is no local model runtime here; every call reaches out over HTTP. The wrapped surface is OpenAI's API and anything OpenAI-compatible — **OpenAI**, **Azure OpenAI**, the **Anthropic Claude** API, and self-hosted/compatible gateways — selected by the `openai_provider` config.
 
-Layer position: depends downward on `starpkg/base` (the configurable-module/config-option system), `1set/starlet` (the Machine + `dataconv` for Go⇄Starlark conversion and thread context), and transitively `1set/starlight` + `go.starlark.net`. The single third-party SDK is `github.com/sashabaranov/go-openai` (imported as `oai`). Nothing in the ecosystem depends on this module.
+Layer position: depends downward on `starpkg/base` (the configurable-module/config-option system), `1set/starlet` (the Machine + `dataconv` for Go⇄Starlark conversion and thread context), and transitively `1set/starlight` + `go.starlark.net`. The single third-party SDK is `github.com/sashabaranov/go-openai` (imported as `oai`). StarCLI registers this module; it does not depend upward on StarCLI.
 
 ## Dev commands
 
