@@ -29,10 +29,10 @@ model without juggling HTTP, auth headers, retries, or response shapes.
   (`retry`, `allow_error`), and custom/provider-specific parameters via
   `kwargs`.
 
-It is an L4 domain module: it depends downward on `starpkg/base` (the
+It is an L3 domain module: it depends downward on `starpkg/base` (the
 module/config system), `1set/starlet` (the Machine + `dataconv`), and
-transitively `1set/starlight` + `go.starlark.net`. Nothing in the ecosystem
-depends on it.
+transitively `1set/starlight` + `go.starlark.net`. StarCLI registers this
+module; it does not depend upward on StarCLI.
 
 For the complete per-builtin reference — signatures, parameters, returns,
 errors, examples — and the configuration accessors, see
